@@ -172,11 +172,11 @@ impl<N: Network> AutoFaucet<N> {
 
     pub fn transfer(&mut self, addr: Address<N>, amount: u64) -> anyhow::Result<(String, String)> {
         tracing::warn!("transfering to {} amount {amount}", addr);
-        let (_, transfer_record) = self
+        let (r1, transfer_record) = self
             .unspent_records
             .pop_front()?
             .ok_or(anyhow::anyhow!("no unspent record for execution gas"))?;
-        let (_, fee_record) = self
+        let (r2, fee_record) = self
             .unspent_records
             .pop_front()?
             .ok_or(anyhow::anyhow!("no unspent record for execution gas"))?;
@@ -186,16 +186,24 @@ impl<N: Network> AutoFaucet<N> {
             format!("{amount}u64"),
         ];
 
-        let result = self.pm.execute_program(
+        match self.pm.execute_program(
             "credits.aleo",
             "transfer",
             inputs.iter(),
             25000,
-            fee_record,
+            fee_record.clone(),
             None,
-        )?;
-        tracing::info!("transfer result: {:?}", result);
-        Ok((addr.to_string(), result))
+        ) {
+            Ok(result) => Ok((addr.to_string(), result)),
+            Err(e) => {
+                if e.to_string().contains("global state root") {
+                    self.unspent_records.insert(&r1, &transfer_record)?;
+                    self.unspent_records.insert(&r2, &fee_record)?;
+                }
+
+                return Err(e);
+            }
+        }
     }
 }
 
