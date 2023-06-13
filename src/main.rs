@@ -72,8 +72,8 @@ fn main() {
                 if let Ok(lens) = faucet.unspent_records.lens() {
                     tracing::info!("unspent_records lens: {}", lens);
                     if lens >= 2 {
-                        let record = faucet.unspent_records.pop_front().unwrap().unwrap().1;
-                        let fee_record = faucet.unspent_records.pop_front().unwrap().unwrap().1;
+                        let record = faucet.unspent_records.pop_front().unwrap().unwrap();
+                        let fee_record = faucet.unspent_records.pop_front().unwrap().unwrap();
                         tx.send((addr.clone(), record, fee_record)).unwrap();
                         break;
                     }
@@ -87,7 +87,7 @@ fn main() {
     });
 
     while let Ok((addr, record, fee_record)) = rx.recv() {
-        match faucet_clone.transfer(addr, amount, record, fee_record) {
+        match faucet_clone.transfer(addr, amount, record.1.clone(), fee_record.1.clone()) {
             Ok((addr, tx_id)) => {
                 tracing::info!("Transfered to {} tx_id {}", addr, tx_id);
                 result_file
@@ -95,6 +95,11 @@ fn main() {
                     .expect("write result file");
             }
             Err(e) => {
+                faucet_clone.unspent_records.insert(&record.0, &record.1).expect("insert record");
+                faucet_clone
+                    .unspent_records
+                    .insert(&fee_record.0, &fee_record.1)
+                    .expect("insert fee record");
                 tracing::error!("Error transferring: {:?}", e);
             }
         }
