@@ -58,8 +58,13 @@ fn main() {
         .append(true)
         .open(RESULT_PATH)
         .expect("result file");
+    let (tx, rx) = std::sync::mpsc::channel();
 
     for addr in addrs {
+        tx.send(addr).expect("send addr");
+    }
+
+    while let Ok(addr) = rx.recv() {
         if let Err(e) = faucet.sync() {
             tracing::error!("Error syncing: {:?}", e);
         }
@@ -72,6 +77,7 @@ fn main() {
             }
             Err(e) => {
                 tracing::error!("Error transferring: {:?}", e);
+                tx.send(addr).expect("send addr");
             }
         }
     }
