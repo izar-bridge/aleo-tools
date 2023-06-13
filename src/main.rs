@@ -13,7 +13,7 @@ pub mod db;
 #[clap(name = "auto-faucet")]
 pub struct Cli {
     #[clap(long)]
-    pub aleo_rpc: String,
+    pub aleo_rpc: Option<String>,
 
     #[clap(long)]
     pub path: String,
@@ -69,21 +69,27 @@ pub struct AutoFaucet<N: Network> {
 
 impl<N: Network> AutoFaucet<N> {
     pub fn new(
-        aleo_rpc: String,
+        aleo_rpc: Option<String>,
         pk: PrivateKey<N>,
         vk: ViewKey<N>,
         from_height: u32,
     ) -> anyhow::Result<Self> {
-        let network_key = format!("{}-{}", aleo_rpc, pk);
         let unspent_records = RocksDB::open_map("unspent_records")?;
         let network = RocksDB::open_map("network")?;
+
+        let (network_key, aleo_client) = match aleo_rpc {
+            Some(aleo_rpc) => (
+                format!("{}-{}", aleo_rpc, pk),
+                AleoAPIClient::new(&aleo_rpc, "testnet3")?,
+            ),
+            None => (format!("aleo_main_net-{pk}"), AleoAPIClient::testnet3()),
+        };
+
+        let pm = ProgramManager::new(Some(pk.clone()), None, Some(aleo_client.clone()), None)?;
         let cur = network.get(&network_key)?.unwrap_or(0);
         if from_height > cur {
             network.insert(&network_key, &from_height)?;
         }
-
-        let aleo_client = AleoAPIClient::new(&aleo_rpc, "testnet3")?;
-        let pm = ProgramManager::new(Some(pk.clone()), None, Some(aleo_client.clone()), None)?;
 
         Ok(Self {
             vk,
