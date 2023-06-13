@@ -198,6 +198,19 @@ impl<K: Serialize + DeserializeOwned, V: Serialize + DeserializeOwned> DBMap<K, 
         Ok(None)
     }
 
+    pub fn lens(&self) -> anyhow::Result<usize> {
+        let mut count = 0;
+        let iter = self.inner.prefix_iterator(self.prefix.clone());
+        for item in iter {
+            let (key, _) = item?;
+            if key.starts_with(&self.prefix) {
+                count += 1;
+            }
+        }
+
+        Ok(count)
+    }
+
     pub fn contain(&self, key: &K) -> anyhow::Result<bool> {
         let key_bytes = bincode::serialize(key)?;
         let real_key = [self.prefix.clone(), key_bytes].concat();

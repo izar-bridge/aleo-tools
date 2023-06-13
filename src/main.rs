@@ -2,7 +2,7 @@ use std::{
     fs::File,
     io::{Read, Write},
     path::Path,
-    str::FromStr,
+    str::FromStr, time::Duration,
 };
 
 use aleo_rust::{
@@ -50,7 +50,7 @@ fn main() {
     let pk = PrivateKey::<Testnet3>::from_str(&pk).expect("private key");
     let vk = ViewKey::try_from(&pk).expect("view key");
 
-    let mut faucet = AutoFaucet::new(aleo_rpc, pk, vk, from_height).expect("faucet");
+    let faucet = AutoFaucet::new(aleo_rpc, pk, vk, from_height).expect("faucet");
     let addrs = get_addrs_from_path(path, RESULT_PATH);
     // open or create result file
     let mut result_file = File::options()
@@ -59,11 +59,35 @@ fn main() {
         .open(RESULT_PATH)
         .expect("result file");
 
-    for addr in addrs {
-        if let Err(e) = faucet.sync() {
-            tracing::error!("Error syncing: {:?}", e);
+    let (tx, rx) = std::sync::mpsc::channel();
+
+    let mut faucet_clone = faucet.clone();
+    std::thread::spawn(move || {
+        for addr in addrs {
+            if let Err(e) = faucet.sync() {
+                tracing::error!("Error syncing: {:?}", e);
+            }
+
+            loop {
+                if let Ok(lens) = faucet.unspent_records.lens() {
+                    tracing::info!("unspent_records lens: {}", lens);
+                    if lens >= 2 {
+                        let record = faucet.unspent_records.pop_front().unwrap().unwrap().1;
+                        let fee_record = faucet.unspent_records.pop_front().unwrap().unwrap().1;
+                        tx.send((addr.clone(), record, fee_record)).unwrap();
+                        break;
+                    }
+                }
+                std::thread::sleep(Duration::from_secs(15));
+                if let Err(e) = faucet.sync() {
+                    tracing::error!("Error syncing: {:?}", e);
+                }
+            }
         }
-        match faucet.transfer(addr, amount) {
+    });
+
+    while let Ok((addr, record, fee_record)) = rx.recv() {
+        match faucet_clone.transfer(addr, amount, record, fee_record) {
             Ok((addr, tx_id)) => {
                 tracing::info!("Transfered to {} tx_id {}", addr, tx_id);
                 result_file
@@ -170,21 +194,16 @@ impl<N: Network> AutoFaucet<N> {
         Ok(())
     }
 
-    pub fn transfer(&mut self, addr: Address<N>, amount: u64) -> anyhow::Result<(String, String)> {
+    pub fn transfer(
+        &mut self,
+        addr: Address<N>,
+        amount: u64,
+        record: Record<N, Plaintext<N>>,
+        fee_record: Record<N, Plaintext<N>>,
+    ) -> anyhow::Result<(String, String)> {
         tracing::warn!("transfering to {} amount {amount}", addr);
-        let (_, transfer_record) = self
-            .unspent_records
-            .pop_front()?
-            .ok_or(anyhow::anyhow!("no unspent record for execution gas"))?;
-        let (_, fee_record) = self
-            .unspent_records
-            .pop_front()?
-            .ok_or(anyhow::anyhow!("no unspent record for execution gas"))?;
-        let inputs = vec![
-            transfer_record.to_string(),
-            addr.to_string(),
-            format!("{amount}u64"),
-        ];
+
+        let inputs = vec![record.to_string(), addr.to_string(), format!("{amount}u64")];
 
         let result = self.pm.execute_program(
             "credits.aleo",
