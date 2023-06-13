@@ -1,4 +1,9 @@
-use std::{io::Read, path::Path, str::FromStr};
+use std::{
+    fs::File,
+    io::{Read, Write},
+    path::Path,
+    str::FromStr,
+};
 
 use aleo_rust::{
     Address, AleoAPIClient, Block, Ciphertext, Credits, Network, Plaintext, PrivateKey,
@@ -6,6 +11,8 @@ use aleo_rust::{
 };
 use clap::Parser;
 use db::{DBMap, RocksDB};
+
+const RESULT_PATH: &str = "result.txt";
 
 pub mod db;
 
@@ -44,14 +51,28 @@ fn main() {
     let vk = ViewKey::try_from(&pk).expect("view key");
 
     let mut faucet = AutoFaucet::new(aleo_rpc, pk, vk, from_height).expect("faucet");
-    let addrs = get_addrs_from_path(path);
+    let addrs = get_addrs_from_path(path, RESULT_PATH);
+    // open or create result file
+    let mut result_file = File::options()
+        .create(true)
+        .append(true)
+        .open(RESULT_PATH)
+        .expect("result file");
 
     for addr in addrs {
         if let Err(e) = faucet.sync() {
             tracing::error!("Error syncing: {:?}", e);
         }
-        if let Err(e) = faucet.transfer(addr, amount) {
-            tracing::error!("Error transferring: {:?}", e);
+        match faucet.transfer(addr, amount) {
+            Ok((addr, tx_id)) => {
+                tracing::info!("Transfered to {} tx_id {}", addr, tx_id);
+                result_file
+                    .write_all(format!("{} {}\n", addr, tx_id).as_bytes())
+                    .expect("write result file");
+            }
+            Err(e) => {
+                tracing::error!("Error transferring: {:?}", e);
+            }
         }
     }
 }
@@ -178,8 +199,12 @@ impl<N: Network> AutoFaucet<N> {
     }
 }
 
-pub fn get_addrs_from_path(p: impl AsRef<Path>) -> Vec<Address<Testnet3>> {
+pub fn get_addrs_from_path(
+    p: impl AsRef<Path>,
+    filter_path: impl AsRef<Path>,
+) -> Vec<Address<Testnet3>> {
     let mut file = std::fs::File::open(p).expect("file");
+
     let mut buf = String::new();
     file.read_to_string(&mut buf).expect("read");
     let mut vec = vec![];
@@ -190,5 +215,13 @@ pub fn get_addrs_from_path(p: impl AsRef<Path>) -> Vec<Address<Testnet3>> {
             tracing::error!("invalid address: {}", l);
         }
     });
+    // filter addr
+    {
+        if let Ok(mut file) = std::fs::File::open(filter_path) {
+            let mut buf = String::new();
+            file.read_to_string(&mut buf).expect("read");
+            vec.retain(|addr| !buf.contains(addr.to_string().as_str()));
+        }
+    }
     vec
 }
