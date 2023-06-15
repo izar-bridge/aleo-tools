@@ -74,10 +74,10 @@ fn main() {
                 Ok((addr, tx_id)) => {
                     tracing::info!("Transfered to {} tx_id {}", addr, tx_id);
                     result_file
-                    .write_all(format!("{} {}\n", addr, tx_id).as_bytes())
-                    .expect("write result file");
-                break;
-            }
+                        .write_all(format!("{} {}\n", addr, tx_id).as_bytes())
+                        .expect("write result file");
+                    break;
+                }
                 Err(e) => {
                     tracing::error!("Error transferring: {:?}", e);
                 }
@@ -228,7 +228,7 @@ impl<N: Network> AutoFaucet<N> {
         ) {
             Ok(result) => Ok((addr.to_string(), result)),
             Err(e) => {
-                if e.to_string().contains("global state root") {
+                if !e.to_string().contains("already exists in the ledger") {
                     tracing::warn!("reinsert unspent records");
                     self.unspent_records.insert(&r1, &transfer_record)?;
                     self.unspent_records.insert(&r2, &fee_record)?;
