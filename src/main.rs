@@ -52,35 +52,57 @@ fn main() {
 
     let mut faucet = AutoFaucet::new(aleo_rpc, pk, vk, from_height).expect("faucet");
     let addrs = get_addrs_from_path(path, RESULT_PATH);
+    tracing::info!("Waiting for sending to {} addrs", addrs.len());
     // open or create result file
     let mut result_file = File::options()
         .create(true)
         .append(true)
         .open(RESULT_PATH)
         .expect("result file");
-    let (tx, rx) = std::sync::mpsc::channel();
 
+    const RETRY_TIME: usize = 5;
     for addr in addrs {
-        tx.send(addr).expect("send addr");
-    }
-
-    while let Ok(addr) = rx.recv() {
         if let Err(e) = faucet.sync() {
             tracing::error!("Error syncing: {:?}", e);
         }
-        match faucet.transfer(addr, amount) {
-            Ok((addr, tx_id)) => {
-                tracing::info!("Transfered to {} tx_id {}", addr, tx_id);
-                result_file
-                    .write_all(format!("{} {}\n", addr, tx_id).as_bytes())
-                    .expect("write result file");
-            }
-            Err(e) => {
-                tracing::error!("Error transferring: {:?}", e);
-                tx.send(addr).expect("send addr");
+        for _ in 0..RETRY_TIME {
+            match faucet.transfer(addr, amount) {
+                Ok((addr, tx_id)) => {
+                    tracing::info!("Transfered to {} tx_id {}", addr, tx_id);
+                    result_file
+                        .write_all(format!("{} {}\n", addr, tx_id).as_bytes())
+                        .expect("write result file");
+                    break;
+                }
+                Err(e) => {
+                    tracing::error!("Error transferring: {:?}", e);
+                }
             }
         }
     }
+
+    // let (tx, rx) = std::sync::mpsc::channel();
+    // for addr in addrs {
+    //     tx.send(addr).expect("send addr");
+    // }
+
+    // while let Ok(addr) = rx.recv() {
+    //     if let Err(e) = faucet.sync() {
+    //         tracing::error!("Error syncing: {:?}", e);
+    //     }
+    //     match faucet.transfer(addr, amount) {
+    //         Ok((addr, tx_id)) => {
+    //             tracing::info!("Transfered to {} tx_id {}", addr, tx_id);
+    //             result_file
+    //                 .write_all(format!("{} {}\n", addr, tx_id).as_bytes())
+    //                 .expect("write result file");
+    //         }
+    //         Err(e) => {
+    //             tracing::error!("Error transferring: {:?}", e);
+    //             tx.send(addr).expect("send addr");
+    //         }
+    //     }
+    // }
 }
 
 #[derive(Clone)]
@@ -238,4 +260,28 @@ pub fn get_addrs_from_path(
         }
     }
     vec
+}
+
+#[test]
+fn test_channel() {
+    let (tx, rx) = std::sync::mpsc::channel();
+
+    for i in 0..10 {
+        tx.send(i).unwrap();
+    }
+
+    let error_handle = |n| {
+        if n % 2 == 0 {
+            Ok(())
+        } else {
+            Err(())
+        }
+    };
+
+    while let Ok(n) = rx.recv() {
+        if let Err(_) = error_handle(n) {
+            println!("error: {}", n);
+            tx.send(n).unwrap();
+        }
+    }
 }
