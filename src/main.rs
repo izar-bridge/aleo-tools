@@ -25,6 +25,9 @@ pub struct Cli {
     #[clap(long)]
     pub path: String,
 
+    #[clap(long, default_value = RESULT_PATH)]
+    pub result_path: String,
+
     #[clap(long)]
     pub pk: String,
 
@@ -42,6 +45,7 @@ fn main() {
     let Cli {
         aleo_rpc,
         path,
+        result_path,
         amount,
         pk,
         from_height,
@@ -57,23 +61,23 @@ fn main() {
     let mut result_file = File::options()
         .create(true)
         .append(true)
-        .open(RESULT_PATH)
+        .open(result_path)
         .expect("result file");
 
     const RETRY_TIME: usize = 5;
     for addr in addrs {
-        if let Err(e) = faucet.sync() {
-            tracing::error!("Error syncing: {:?}", e);
-        }
         for _ in 0..RETRY_TIME {
+            if let Err(e) = faucet.sync() {
+                tracing::error!("Error syncing: {:?}", e);
+            }
             match faucet.transfer(addr, amount) {
                 Ok((addr, tx_id)) => {
                     tracing::info!("Transfered to {} tx_id {}", addr, tx_id);
                     result_file
-                        .write_all(format!("{} {}\n", addr, tx_id).as_bytes())
-                        .expect("write result file");
-                    break;
-                }
+                    .write_all(format!("{} {}\n", addr, tx_id).as_bytes())
+                    .expect("write result file");
+                break;
+            }
                 Err(e) => {
                     tracing::error!("Error transferring: {:?}", e);
                 }
@@ -225,6 +229,7 @@ impl<N: Network> AutoFaucet<N> {
             Ok(result) => Ok((addr.to_string(), result)),
             Err(e) => {
                 if e.to_string().contains("global state root") {
+                    tracing::warn!("reinsert unspent records");
                     self.unspent_records.insert(&r1, &transfer_record)?;
                     self.unspent_records.insert(&r2, &fee_record)?;
                 }
