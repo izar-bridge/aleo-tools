@@ -84,29 +84,6 @@ fn main() {
             }
         }
     }
-
-    // let (tx, rx) = std::sync::mpsc::channel();
-    // for addr in addrs {
-    //     tx.send(addr).expect("send addr");
-    // }
-
-    // while let Ok(addr) = rx.recv() {
-    //     if let Err(e) = faucet.sync() {
-    //         tracing::error!("Error syncing: {:?}", e);
-    //     }
-    //     match faucet.transfer(addr, amount) {
-    //         Ok((addr, tx_id)) => {
-    //             tracing::info!("Transfered to {} tx_id {}", addr, tx_id);
-    //             result_file
-    //                 .write_all(format!("{} {}\n", addr, tx_id).as_bytes())
-    //                 .expect("write result file");
-    //         }
-    //         Err(e) => {
-    //             tracing::error!("Error transferring: {:?}", e);
-    //             tx.send(addr).expect("send addr");
-    //         }
-    //     }
-    // }
 }
 
 #[derive(Clone)]
@@ -220,7 +197,7 @@ impl<N: Network> AutoFaucet<N> {
 
         match self.pm.execute_program(
             "credits.aleo",
-            "transfer",
+            "transfer_private",
             inputs.iter(),
             25000,
             fee_record.clone(),
@@ -268,25 +245,19 @@ pub fn get_addrs_from_path(
 }
 
 #[test]
-fn test_channel() {
-    let (tx, rx) = std::sync::mpsc::channel();
+fn test_gen_addr() {
+    let mut rng = rand::thread_rng();
+    let mut result_file = File::options()
+        .create(true)
+        .append(true)
+        .open("accounts.txt")
+        .expect("account file");
 
-    for i in 0..10 {
-        tx.send(i).unwrap();
-    }
-
-    let error_handle = |n| {
-        if n % 2 == 0 {
-            Ok(())
-        } else {
-            Err(())
-        }
-    };
-
-    while let Ok(n) = rx.recv() {
-        if let Err(_) = error_handle(n) {
-            println!("error: {}", n);
-            tx.send(n).unwrap();
-        }
+    for _ in 0..2000 {
+        let pk = PrivateKey::<Testnet3>::new(&mut rng).unwrap();
+        let addr = Address::<Testnet3>::try_from(&pk).unwrap();
+        result_file
+            .write_all(format!("{} {}\n", addr, pk).as_bytes())
+            .expect("write result file");
     }
 }
