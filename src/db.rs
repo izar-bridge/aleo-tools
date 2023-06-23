@@ -203,7 +203,7 @@ impl<K: Serialize + DeserializeOwned + Clone, V: Serialize + DeserializeOwned + 
 
         Ok(None)
     }
-
+  
     pub fn pop_n_front(&self, num: usize) -> anyhow::Result<Vec<(K, V)>> {
         let mut result = Vec::new();
         let mut keys = Vec::new();
