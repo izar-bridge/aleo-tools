@@ -2,7 +2,7 @@ use std::{
     fs::File,
     io::{Read, Write},
     path::Path,
-    str::FromStr, time::Duration,
+    str::FromStr,
 };
 
 use aleo_rust::{
@@ -54,7 +54,7 @@ fn main() {
     let pk = PrivateKey::<Testnet3>::from_str(&pk).expect("private key");
     let vk = ViewKey::try_from(&pk).expect("view key");
 
-    let faucet = AutoFaucet::new(aleo_rpc, pk, vk, from_height).expect("faucet");
+    let mut faucet = AutoFaucet::new(aleo_rpc, pk, vk, from_height).expect("faucet");
     let addrs = get_addrs_from_path(path, RESULT_PATH);
     tracing::info!("Waiting for sending to {} addrs", addrs.len());
     // open or create result file
@@ -81,6 +81,7 @@ fn main() {
                 }
                 Err(e) => {
                     tracing::error!("Error transferring: {:?}", e);
+                    std::thread::sleep(std::time::Duration::from_secs(15));
                 }
             }
         }
@@ -184,11 +185,9 @@ impl<N: Network> AutoFaucet<N> {
         &mut self,
         addr: Address<N>,
         amount: u64,
-        record: Record<N, Plaintext<N>>,
-        fee_record: Record<N, Plaintext<N>>,
     ) -> anyhow::Result<(String, String)> {
         tracing::warn!("transfering to {} amount {amount}", addr);
-      
+
         let records = self.unspent_records.pop_n_front(2)?;
         let (r1, transfer_record) = &records[0];
         let (r2, fee_record) = &records[1];
