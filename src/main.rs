@@ -25,6 +25,9 @@ pub struct Cli {
     #[clap(long)]
     pub path: String,
 
+    #[clap(long, default_value = RESULT_PATH)]
+    pub result_path: String,
+
     #[clap(long)]
     pub pk: String,
 
@@ -42,6 +45,7 @@ fn main() {
     let Cli {
         aleo_rpc,
         path,
+        result_path,
         amount,
         pk,
         from_height,
@@ -52,55 +56,32 @@ fn main() {
 
     let faucet = AutoFaucet::new(aleo_rpc, pk, vk, from_height).expect("faucet");
     let addrs = get_addrs_from_path(path, RESULT_PATH);
+    tracing::info!("Waiting for sending to {} addrs", addrs.len());
     // open or create result file
     let mut result_file = File::options()
         .create(true)
         .append(true)
-        .open(RESULT_PATH)
+        .open(result_path)
         .expect("result file");
 
-    let (tx, rx) = std::sync::mpsc::channel();
-
-    let mut faucet_clone = faucet.clone();
-    std::thread::spawn(move || {
-        for addr in addrs {
+    const RETRY_TIME: usize = 5;
+    for addr in addrs {
+        for _ in 0..RETRY_TIME {
             if let Err(e) = faucet.sync() {
                 tracing::error!("Error syncing: {:?}", e);
             }
-
-            loop {
-                if let Ok(lens) = faucet.unspent_records.lens() {
-                    tracing::info!("unspent_records lens: {}", lens);
-                    if lens >= 2 {
-                        let record = faucet.unspent_records.pop_front().unwrap().unwrap();
-                        let fee_record = faucet.unspent_records.pop_front().unwrap().unwrap();
-                        tx.send((addr.clone(), record, fee_record)).unwrap();
-                        break;
-                    }
+            println!("holding record {:?}", faucet.unspent_records.get_all());
+            match faucet.transfer(addr, amount) {
+                Ok((addr, tx_id)) => {
+                    tracing::info!("Transfered to {} tx_id {}", addr, tx_id);
+                    result_file
+                        .write_all(format!("{} {}\n", addr, tx_id).as_bytes())
+                        .expect("write result file");
+                    break;
                 }
-                std::thread::sleep(Duration::from_secs(15));
-                if let Err(e) = faucet.sync() {
-                    tracing::error!("Error syncing: {:?}", e);
+                Err(e) => {
+                    tracing::error!("Error transferring: {:?}", e);
                 }
-            }
-        }
-    });
-
-    while let Ok((addr, record, fee_record)) = rx.recv() {
-        match faucet_clone.transfer(addr, amount, record.1.clone(), fee_record.1.clone()) {
-            Ok((addr, tx_id)) => {
-                tracing::info!("Transfered to {} tx_id {}", addr, tx_id);
-                result_file
-                    .write_all(format!("{} {}\n", addr, tx_id).as_bytes())
-                    .expect("write result file");
-            }
-            Err(e) => {
-                faucet_clone.unspent_records.insert(&record.0, &record.1).expect("insert record");
-                faucet_clone
-                    .unspent_records
-                    .insert(&fee_record.0, &fee_record.1)
-                    .expect("insert fee record");
-                tracing::error!("Error transferring: {:?}", e);
             }
         }
     }
@@ -135,7 +116,7 @@ impl<N: Network> AutoFaucet<N> {
             None => (format!("aleo_main_net-{pk}"), AleoAPIClient::testnet3()),
         };
 
-        let pm = ProgramManager::new(Some(pk.clone()), None, Some(aleo_client.clone()), None)?;
+        let pm = ProgramManager::new(Some(pk), None, Some(aleo_client.clone()), None)?;
         let cur = network.get(&network_key)?.unwrap_or(0);
         if from_height > cur {
             network.insert(&network_key, &from_height)?;
@@ -207,19 +188,35 @@ impl<N: Network> AutoFaucet<N> {
         fee_record: Record<N, Plaintext<N>>,
     ) -> anyhow::Result<(String, String)> {
         tracing::warn!("transfering to {} amount {amount}", addr);
+      
+        let records = self.unspent_records.pop_n_front(2)?;
+        let (r1, transfer_record) = &records[0];
+        let (r2, fee_record) = &records[1];
+        let inputs = vec![
+            transfer_record.to_string(),
+            addr.to_string(),
+            format!("{amount}u64"),
+        ];
 
-        let inputs = vec![record.to_string(), addr.to_string(), format!("{amount}u64")];
-
-        let result = self.pm.execute_program(
+        match self.pm.execute_program(
             "credits.aleo",
-            "transfer",
+            "transfer_private",
             inputs.iter(),
             25000,
-            fee_record,
+            fee_record.clone(),
             None,
-        )?;
-        tracing::info!("transfer result: {:?}", result);
-        Ok((addr.to_string(), result))
+        ) {
+            Ok(result) => Ok((addr.to_string(), result)),
+            Err(e) => {
+                if !e.to_string().contains("already exists in the ledger") {
+                    tracing::warn!("reinsert unspent records");
+                    self.unspent_records.insert(r1, transfer_record)?;
+                    self.unspent_records.insert(r2, fee_record)?;
+                }
+
+                Err(e)
+            }
+        }
     }
 }
 
@@ -248,4 +245,22 @@ pub fn get_addrs_from_path(
         }
     }
     vec
+}
+
+#[test]
+fn test_gen_addr() {
+    let mut rng = rand::thread_rng();
+    let mut result_file = File::options()
+        .create(true)
+        .append(true)
+        .open("accounts.txt")
+        .expect("account file");
+
+    for _ in 0..2000 {
+        let pk = PrivateKey::<Testnet3>::new(&mut rng).unwrap();
+        let addr = Address::<Testnet3>::try_from(&pk).unwrap();
+        result_file
+            .write_all(format!("{} {}\n", addr, pk).as_bytes())
+            .expect("write result file");
+    }
 }

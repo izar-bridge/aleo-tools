@@ -32,7 +32,10 @@ impl RocksDB {
         Ok(database)
     }
 
-    pub fn open_map<K: Serialize + DeserializeOwned, V: Serialize + DeserializeOwned>(
+    pub fn open_map<
+        K: Serialize + DeserializeOwned + Clone,
+        V: Serialize + DeserializeOwned + Clone,
+    >(
         prefix: &str,
     ) -> anyhow::Result<DBMap<K, V>> {
         let db = Self::open()?;
@@ -69,7 +72,10 @@ impl RocksDB {
         Ok(database)
     }
 
-    pub fn test_open_map<K: Serialize + DeserializeOwned, V: Serialize + DeserializeOwned>(
+    pub fn test_open_map<
+        K: Serialize + DeserializeOwned + Clone,
+        V: Serialize + DeserializeOwned + Clone,
+    >(
         prefix: &str,
     ) -> anyhow::Result<DBMap<K, V>> {
         let db = Self::test_open()?;
@@ -89,13 +95,13 @@ impl RocksDB {
 }
 
 #[derive(Clone)]
-pub struct DBMap<K: Serialize + DeserializeOwned, V: Serialize + DeserializeOwned> {
+pub struct DBMap<K: Serialize + DeserializeOwned + Clone, V: Serialize + DeserializeOwned + Clone> {
     pub inner: Arc<rocksdb::DB>,
     prefix: Vec<u8>,
     _marker: std::marker::PhantomData<(K, V)>,
 }
 
-impl<K: Serialize + DeserializeOwned, V: Serialize + DeserializeOwned> DBMap<K, V> {
+impl<K: Serialize + DeserializeOwned + Clone, V: Serialize + DeserializeOwned + Clone> DBMap<K, V> {
     pub fn insert(&self, key: &K, value: &V) -> anyhow::Result<()> {
         let key_bytes = bincode::serialize(key)?;
         let value_bytes = bincode::serialize(value)?;
@@ -180,9 +186,9 @@ impl<K: Serialize + DeserializeOwned, V: Serialize + DeserializeOwned> DBMap<K, 
     }
 
     pub fn pop_front(&self) -> anyhow::Result<Option<(K, V)>> {
-        let mut iter = self.inner.prefix_iterator(self.prefix.clone());
+        let iter = self.inner.prefix_iterator(self.prefix.clone());
 
-        while let Some(item) = iter.next() {
+        for item in iter {
             let (key, value) = item?;
             if key.starts_with(&self.prefix) {
                 let key = &key[self.prefix.len()..];
@@ -197,18 +203,34 @@ impl<K: Serialize + DeserializeOwned, V: Serialize + DeserializeOwned> DBMap<K, 
 
         Ok(None)
     }
-
-    pub fn lens(&self) -> anyhow::Result<usize> {
-        let mut count = 0;
+  
+    pub fn pop_n_front(&self, num: usize) -> anyhow::Result<Vec<(K, V)>> {
+        let mut result = Vec::new();
+        let mut keys = Vec::new();
         let iter = self.inner.prefix_iterator(self.prefix.clone());
+
         for item in iter {
-            let (key, _) = item?;
+            let (key, value) = item?;
             if key.starts_with(&self.prefix) {
-                count += 1;
+                let key = &key[self.prefix.len()..];
+                let key: K = bincode::deserialize(key)?;
+                let value = bincode::deserialize(&value)?;
+
+                result.push((key.clone(), value));
+                keys.push(key);
+
+                if result.len() >= num {
+                    break;
+                }
             }
         }
 
-        Ok(count)
+        if result.len() != num {
+            anyhow::bail!("pop_n_front not enough")
+        } else {
+            self.batch_remove(&keys)?;
+            Ok(result)
+        }
     }
 
     pub fn contain(&self, key: &K) -> anyhow::Result<bool> {
