@@ -70,6 +70,7 @@ fn main() {
             if let Err(e) = faucet.sync() {
                 tracing::error!("Error syncing: {:?}", e);
             }
+            println!("holding record {:?}", faucet.unspent_records.get_all());
             match faucet.transfer(addr, amount) {
                 Ok((addr, tx_id)) => {
                     tracing::info!("Transfered to {} tx_id {}", addr, tx_id);
@@ -181,14 +182,9 @@ impl<N: Network> AutoFaucet<N> {
 
     pub fn transfer(&mut self, addr: Address<N>, amount: u64) -> anyhow::Result<(String, String)> {
         tracing::warn!("transfering to {} amount {amount}", addr);
-        let (r1, transfer_record) = self
-            .unspent_records
-            .pop_front()?
-            .ok_or(anyhow::anyhow!("no unspent record for execution gas"))?;
-        let (r2, fee_record) = self
-            .unspent_records
-            .pop_front()?
-            .ok_or(anyhow::anyhow!("no unspent record for execution gas"))?;
+        let records = self.unspent_records.pop_n_front(2)?;
+        let (r1, transfer_record) = &records[0];
+        let (r2, fee_record) = &records[1];
         let inputs = vec![
             transfer_record.to_string(),
             addr.to_string(),
