@@ -186,9 +186,9 @@ impl<K: Serialize + DeserializeOwned + Clone, V: Serialize + DeserializeOwned + 
     }
 
     pub fn pop_front(&self) -> anyhow::Result<Option<(K, V)>> {
-        let mut iter = self.inner.prefix_iterator(self.prefix.clone());
+        let iter = self.inner.prefix_iterator(self.prefix.clone());
 
-        while let Some(item) = iter.next() {
+        for item in iter {
             let (key, value) = item?;
             if key.starts_with(&self.prefix) {
                 let key = &key[self.prefix.len()..];
@@ -207,9 +207,9 @@ impl<K: Serialize + DeserializeOwned + Clone, V: Serialize + DeserializeOwned + 
     pub fn pop_n_front(&self, num: usize) -> anyhow::Result<Vec<(K, V)>> {
         let mut result = Vec::new();
         let mut keys = Vec::new();
-        let mut iter = self.inner.prefix_iterator(self.prefix.clone());
+        let iter = self.inner.prefix_iterator(self.prefix.clone());
 
-        while let Some(item) = iter.next() {
+        for item in iter {
             let (key, value) = item?;
             if key.starts_with(&self.prefix) {
                 let key = &key[self.prefix.len()..];

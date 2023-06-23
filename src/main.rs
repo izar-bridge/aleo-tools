@@ -116,7 +116,7 @@ impl<N: Network> AutoFaucet<N> {
             None => (format!("aleo_main_net-{pk}"), AleoAPIClient::testnet3()),
         };
 
-        let pm = ProgramManager::new(Some(pk.clone()), None, Some(aleo_client.clone()), None)?;
+        let pm = ProgramManager::new(Some(pk), None, Some(aleo_client.clone()), None)?;
         let cur = network.get(&network_key)?.unwrap_or(0);
         if from_height > cur {
             network.insert(&network_key, &from_height)?;
@@ -203,11 +203,11 @@ impl<N: Network> AutoFaucet<N> {
             Err(e) => {
                 if !e.to_string().contains("already exists in the ledger") {
                     tracing::warn!("reinsert unspent records");
-                    self.unspent_records.insert(&r1, &transfer_record)?;
-                    self.unspent_records.insert(&r2, &fee_record)?;
+                    self.unspent_records.insert(r1, transfer_record)?;
+                    self.unspent_records.insert(r2, fee_record)?;
                 }
 
-                return Err(e);
+                Err(e)
             }
         }
     }
