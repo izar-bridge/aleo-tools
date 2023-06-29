@@ -255,7 +255,7 @@ fn test_gen_addr() {
         .open("accounts.txt")
         .expect("account file");
 
-    for _ in 0..2000 {
+    for _ in 0..100 {
         let pk = PrivateKey::<Testnet3>::new(&mut rng).unwrap();
         let addr = Address::<Testnet3>::try_from(&pk).unwrap();
         result_file
