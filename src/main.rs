@@ -1,18 +1,18 @@
-use std::{
-    fs::File,
-    io::{Read, Write},
-    path::Path,
-    str::FromStr,
-};
+use std::net::SocketAddr;
+use std::str::FromStr;
 
 use aleo_rust::{
     Address, AleoAPIClient, Block, Ciphertext, Credits, Network, Plaintext, PrivateKey,
     ProgramManager, Record, Testnet3, ViewKey,
 };
+use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
 use clap::Parser;
 use db::{DBMap, RocksDB};
-
-const RESULT_PATH: &str = "result.txt";
+use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc::{self, Receiver, Sender};
+use tower_http::cors::Any;
+use tower_http::{cors::CorsLayer, trace, trace::TraceLayer};
+use tracing::Level;
 
 pub mod db;
 
@@ -23,69 +23,42 @@ pub struct Cli {
     pub aleo_rpc: Option<String>,
 
     #[clap(long)]
-    pub path: String,
-
-    #[clap(long, default_value = RESULT_PATH)]
-    pub result_path: String,
-
-    #[clap(long)]
     pub pk: String,
-
-    #[clap(long, default_value = "5000000")]
-    pub amount: u64,
 
     #[clap(long, default_value = "0")]
     pub from_height: u32,
+
+    #[clap(long, default_value = "8989")]
+    pub port: u16,
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     tracing_subscriber::fmt().init();
     let cli = Cli::parse();
     tracing::info!("cli: {:?}", cli);
     let Cli {
         aleo_rpc,
-        path,
-        result_path,
-        amount,
         pk,
         from_height,
+        port,
     } = cli;
 
     let pk = PrivateKey::<Testnet3>::from_str(&pk).expect("private key");
     let vk = ViewKey::try_from(&pk).expect("view key");
 
-    let mut faucet = AutoFaucet::new(aleo_rpc, pk, vk, from_height).expect("faucet");
-    let addrs = get_addrs_from_path(path, RESULT_PATH);
-    tracing::info!("Waiting for sending to {} addrs", addrs.len());
-    // open or create result file
-    let mut result_file = File::options()
-        .create(true)
-        .append(true)
-        .open(result_path)
-        .expect("result file");
+    let faucet = AutoFaucet::new(aleo_rpc, pk, vk, from_height).expect("faucet");
 
-    const RETRY_TIME: usize = 5;
-    for addr in addrs {
-        for _ in 0..RETRY_TIME {
-            if let Err(e) = faucet.sync() {
-                tracing::error!("Error syncing: {:?}", e);
-            }
-            println!("holding record {:?}", faucet.unspent_records.get_all());
-            match faucet.transfer(addr, amount) {
-                Ok((addr, tx_id)) => {
-                    tracing::info!("Transfered to {} tx_id {}", addr, tx_id);
-                    result_file
-                        .write_all(format!("{} {}\n", addr, tx_id).as_bytes())
-                        .expect("write result file");
-                    break;
-                }
-                Err(e) => {
-                    tracing::error!("Error transferring: {:?}", e);
-                    std::thread::sleep(std::time::Duration::from_secs(15));
-                }
-            }
-        }
-    }
+    let addr = SocketAddr::from(([0,0,0,0], port));
+    faucet.sync_and_initial(addr).await.expect("server panic");
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Execution {
+    program_id: String,
+    program_function: String,
+    inputs: Vec<String>,
+    fee: u64,
 }
 
 #[derive(Clone)]
@@ -181,11 +154,85 @@ impl<N: Network> AutoFaucet<N> {
         Ok(())
     }
 
-    pub fn transfer(
-        &mut self,
-        addr: Address<N>,
-        amount: u64,
-    ) -> anyhow::Result<(String, String)> {
+    pub fn execute_program(mut self, mut rx: Receiver<Execution>) {
+        while let Some(exec) = rx.blocking_recv() {
+            let mut exec_f = |exec: Execution| {
+                let (rid, fee_record) = self.get_record()?;
+                let result = self.pm.execute_program(
+                    exec.program_id,
+                    exec.program_function,
+                    exec.inputs.iter(),
+                    exec.fee,
+                    fee_record.clone(),
+                    None,
+                );
+
+                if let Err(e) = &result {
+                    if !e.to_string().contains("already exists in the ledger")
+                        && !e.to_string().contains("Fee record does not have enough")
+                    {
+                        self.unspent_records.insert(&rid, &fee_record)?;
+                    }
+                }
+                result
+            };
+
+            let result = exec_f(exec);
+            tracing::info!("result: {:?}", result);
+        }
+    }
+
+    fn initial(self, rx: Receiver<Execution>) {
+        let self_clone = self.clone();
+        std::thread::spawn(move || loop {
+            if let Err(e) = self_clone.sync() {
+                tracing::error!("failed to sync aleo: {}", e);
+            }
+            tracing::info!("Holding records {:?}", self_clone.unspent_records.get_all());
+            std::thread::sleep(std::time::Duration::from_secs(15));
+        });
+        std::thread::spawn(|| self.execute_program(rx));
+    }
+
+    pub async fn sync_and_initial(self, addr: SocketAddr) -> anyhow::Result<()> {
+        self.sync().expect("failed to sync aleo");
+        let (tx, rx) = mpsc::channel(1000);
+        self.initial(rx);
+
+        // initial server
+        let cors = CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods([
+                axum::http::Method::GET,
+                axum::http::Method::POST,
+                axum::http::Method::OPTIONS,
+            ])
+            .allow_headers([axum::http::header::CONTENT_TYPE]);
+        let router = Router::new()
+            .route("/exec", post(exec))
+            .with_state(tx)
+            .layer(cors)
+            .layer(
+                TraceLayer::new_for_http()
+                    .make_span_with(trace::DefaultMakeSpan::new().level(Level::INFO))
+                    .on_response(trace::DefaultOnResponse::new().level(Level::INFO)),
+            );
+
+        tracing::info!("relayer listening on {}", addr);
+        axum::Server::bind(&addr)
+            .serve(router.into_make_service())
+            .await?;
+        Ok(())
+    }
+
+    pub fn get_record(&self) -> anyhow::Result<(String, Record<N, Plaintext<N>>)> {
+        let record = self.unspent_records.pop_front()?;
+        let (rid, record) = record.ok_or(anyhow::anyhow!("no fee record"))?;
+
+        Ok((rid, record))
+    }
+
+    pub fn transfer(&mut self, addr: Address<N>, amount: u64) -> anyhow::Result<(String, String)> {
         tracing::warn!("transfering to {} amount {amount}", addr);
 
         let records = self.unspent_records.pop_n_front(2)?;
@@ -219,47 +266,14 @@ impl<N: Network> AutoFaucet<N> {
     }
 }
 
-pub fn get_addrs_from_path(
-    p: impl AsRef<Path>,
-    filter_path: impl AsRef<Path>,
-) -> Vec<Address<Testnet3>> {
-    let mut file = std::fs::File::open(p).expect("file");
+async fn exec(
+    State(tx): State<Sender<Execution>>,
+    Json(req): Json<Execution>,
+) -> anyhow::Result<Json<String>, (StatusCode, String)> {
+    tx.send(req).await.map_err(|e| {
+        tracing::error!("failed to send exec request: {:?}", e);
+        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+    })?;
 
-    let mut buf = String::new();
-    file.read_to_string(&mut buf).expect("read");
-    let mut vec = vec![];
-    buf.lines().for_each(|l| {
-        if let Ok(addr) = Address::<Testnet3>::from_str(l) {
-            vec.push(addr);
-        } else {
-            tracing::error!("invalid address: {}", l);
-        }
-    });
-    // filter addr
-    {
-        if let Ok(mut file) = std::fs::File::open(filter_path) {
-            let mut buf = String::new();
-            file.read_to_string(&mut buf).expect("read");
-            vec.retain(|addr| !buf.contains(addr.to_string().as_str()));
-        }
-    }
-    vec
-}
-
-#[test]
-fn test_gen_addr() {
-    let mut rng = rand::thread_rng();
-    let mut result_file = File::options()
-        .create(true)
-        .append(true)
-        .open("accounts.txt")
-        .expect("account file");
-
-    for _ in 0..100 {
-        let pk = PrivateKey::<Testnet3>::new(&mut rng).unwrap();
-        let addr = Address::<Testnet3>::try_from(&pk).unwrap();
-        result_file
-            .write_all(format!("{} {}\n", addr, pk).as_bytes())
-            .expect("write result file");
-    }
+    Ok(Json("already adding into execution queue".to_string()))
 }
