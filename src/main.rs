@@ -49,7 +49,7 @@ async fn main() {
 
     let faucet = AutoFaucet::new(aleo_rpc, pk, vk, from_height).expect("faucet");
 
-    let addr = SocketAddr::from(([0,0,0,0], port));
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
     faucet.sync_and_initial(addr).await.expect("server panic");
 }
 
@@ -116,19 +116,30 @@ impl<N: Network> AutoFaucet<N> {
         for start in (cur..latest).step_by(BATCH_SIZE) {
             let end = (start + BATCH_SIZE as u32).min(latest);
             tracing::warn!("Fetched aleo blocks from {} to {}", start, end);
-            self.client
-                .get_blocks(start, end)?
-                .into_iter()
-                .for_each(|b| {
-                    if let Err(e) = self.handle_credits(&b) {
-                        tracing::error!("Error handling credits: {:?}", e);
-                    }
-                })
+            self.get_blocks(start, end)?.into_iter().for_each(|b| {
+                if let Err(e) = self.handle_credits(&b) {
+                    tracing::error!("Error handling credits: {:?}", e);
+                }
+            })
         }
 
         self.network.insert(&self.network_key, &latest)?;
         tracing::info!("Synced aleo blocks from {} to {}", cur, latest);
         Ok(())
+    }
+
+    pub fn get_blocks(&self, start_height: u32, end_height: u32) -> anyhow::Result<Vec<Block<N>>> {
+        let url = format!(
+            "{}/{}/blocks?start={start_height}&end={end_height}",
+            self.client.base_url(),
+            self.client.network_id()
+        );
+        match ureq::get(&url).call()?.into_json() {
+            Ok(blocks) => Ok(blocks),
+            Err(error) => {
+                anyhow::bail!("Failed to parse blocks {start_height} (inclusive) to {end_height} (exclusive): {error}")
+            }
+        }
     }
 
     pub fn handle_credits(&self, block: &Block<N>) -> anyhow::Result<()> {
