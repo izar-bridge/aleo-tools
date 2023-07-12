@@ -9,7 +9,7 @@ use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
 use clap::Parser;
 use db::{DBMap, RocksDB};
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio::sync::mpsc::Receiver;
 use tower_http::cors::Any;
 use tower_http::{cors::CorsLayer, trace, trace::TraceLayer};
 use tracing::Level;
@@ -67,6 +67,7 @@ pub struct AutoFaucet<N: Network> {
     vk: ViewKey<N>,
     pm: ProgramManager<N>,
     client: AleoAPIClient<N>,
+    agent: ureq::Agent,
     unspent_records: DBMap<String, Record<N, Plaintext<N>>>,
     network: DBMap<String, u32>,
     network_key: String,
@@ -100,6 +101,7 @@ impl<N: Network> AutoFaucet<N> {
             vk,
             pm,
             client: aleo_client,
+            agent: ureq::Agent::new(),
             unspent_records,
             network,
             pk,
@@ -111,7 +113,7 @@ impl<N: Network> AutoFaucet<N> {
         let cur = self.network.get(&self.network_key)?.unwrap_or(0);
         let latest = self.client.latest_height()?;
         tracing::debug!("Requesting aleo blocks from {} to {}", cur, latest);
-        const BATCH_SIZE: usize = 45;
+        const BATCH_SIZE: usize = 500;
 
         for start in (cur..latest).step_by(BATCH_SIZE) {
             let end = (start + BATCH_SIZE as u32).min(latest);
@@ -128,20 +130,6 @@ impl<N: Network> AutoFaucet<N> {
         Ok(())
     }
 
-    pub fn get_blocks(&self, start_height: u32, end_height: u32) -> anyhow::Result<Vec<Block<N>>> {
-        let url = format!(
-            "{}/{}/blocks?start={start_height}&end={end_height}",
-            self.client.base_url(),
-            self.client.network_id()
-        );
-        match ureq::get(&url).call()?.into_json() {
-            Ok(blocks) => Ok(blocks),
-            Err(error) => {
-                anyhow::bail!("Failed to parse blocks {start_height} (inclusive) to {end_height} (exclusive): {error}")
-            }
-        }
-    }
-
     pub fn handle_credits(&self, block: &Block<N>) -> anyhow::Result<()> {
         // handle in
         block.clone().into_serial_numbers().for_each(|sn| {
@@ -155,7 +143,7 @@ impl<N: Network> AutoFaucet<N> {
             let sn = Record::<N, Ciphertext<N>>::serial_number(self.pk, commit)?;
             let record = record.decrypt(&self.vk)?;
             if let Ok(credits) = record.microcredits() {
-                if credits > 40000 {
+                if credits > 4000000 {
                     tracing::info!("got a new record {:?}", record);
                     self.unspent_records.insert(&sn.to_string(), &record)?;
                 }
@@ -193,7 +181,51 @@ impl<N: Network> AutoFaucet<N> {
         }
     }
 
-    fn initial(self, rx: Receiver<Execution>) {
+    pub fn get_blocks(&self, start_height: u32, end_height: u32) -> anyhow::Result<Vec<Block<N>>> {
+        let start_time = std::time::Instant::now();
+        let url = format!(
+            "{}/{}/blocks?start={start_height}&end={end_height}",
+            self.client.base_url(),
+            self.client.network_id()
+        );
+        let blocks = match self.agent.get(&url).call()?.into_json() {
+            Ok(blocks) => Ok(blocks),
+            Err(error) => {
+                anyhow::bail!("Failed to parse blocks {start_height} (inclusive) to {end_height} (exclusive): {error}")
+            }
+        };
+
+        tracing::debug!(
+            "Fetched aleo blocks from {} to {} in {:?}",
+            start_height,
+            end_height,
+            start_time.elapsed()
+        );
+        blocks
+    }
+
+    pub fn execute(&mut self, exec: Execution) -> anyhow::Result<String> {
+        let (rid, fee_record) = self.get_record()?;
+        let result = self.pm.execute_program(
+            exec.program_id,
+            exec.program_function,
+            exec.inputs.iter(),
+            exec.fee,
+            fee_record.clone(),
+            None,
+        );
+
+        if let Err(e) = &result {
+            if !e.to_string().contains("already exists in the ledger")
+                && !e.to_string().contains("Fee record does not have enough")
+            {
+                self.unspent_records.insert(&rid, &fee_record)?;
+            }
+        }
+        result
+    }
+
+    fn initial(self) -> Self {
         let self_clone = self.clone();
         std::thread::spawn(move || loop {
             if let Err(e) = self_clone.sync() {
@@ -202,13 +234,12 @@ impl<N: Network> AutoFaucet<N> {
             tracing::info!("Holding records {:?}", self_clone.unspent_records.get_all());
             std::thread::sleep(std::time::Duration::from_secs(15));
         });
-        std::thread::spawn(|| self.execute_program(rx));
+        self
     }
 
     pub async fn sync_and_initial(self, addr: SocketAddr) -> anyhow::Result<()> {
         self.sync().expect("failed to sync aleo");
-        let (tx, rx) = mpsc::channel(1000);
-        self.initial(rx);
+        let node = self.initial();
 
         // initial server
         let cors = CorsLayer::new()
@@ -221,7 +252,7 @@ impl<N: Network> AutoFaucet<N> {
             .allow_headers([axum::http::header::CONTENT_TYPE]);
         let router = Router::new()
             .route("/exec", post(exec))
-            .with_state(tx)
+            .with_state(node)
             .layer(cors)
             .layer(
                 TraceLayer::new_for_http()
@@ -277,14 +308,14 @@ impl<N: Network> AutoFaucet<N> {
     }
 }
 
-async fn exec(
-    State(tx): State<Sender<Execution>>,
+async fn exec<N: Network>(
+    State(mut node): State<AutoFaucet<N>>,
     Json(req): Json<Execution>,
 ) -> anyhow::Result<Json<String>, (StatusCode, String)> {
-    tx.send(req).await.map_err(|e| {
-        tracing::error!("failed to send exec request: {:?}", e);
+    let tid = node.execute(req).map_err(|e| {
+        tracing::error!("failed to execute: {}", e);
         (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
     })?;
 
-    Ok(Json("already adding into execution queue".to_string()))
+    Ok(Json(tid))
 }
