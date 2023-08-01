@@ -268,10 +268,18 @@ impl<N: Network> AutoFaucet<N> {
             if let Err(e) = self_clone.sync() {
                 tracing::error!("failed to sync aleo: {}", e);
             }
-            tracing::info!("Holding records {:?}", self_clone.unspent_records.get_all());
+            tracing::info!("Holding records balance {:?}", self_clone.get_balance());
             std::thread::sleep(std::time::Duration::from_secs(15));
         });
         self
+    }
+
+    pub fn get_balance(&self) -> anyhow::Result<u64> {
+        let mut balance = 0;
+        for (_, record) in self.unspent_records.get_all()? {
+            balance += record.microcredits()?;
+        }
+        Ok(balance)
     }
 
     pub async fn sync_and_initial(self, addr: SocketAddr) -> anyhow::Result<()> {
