@@ -217,6 +217,7 @@ dependencies = [
  "clap",
  "once_cell",
  "rand",
+ "rayon",
  "rocksdb",
  "serde",
  "serde_json",
