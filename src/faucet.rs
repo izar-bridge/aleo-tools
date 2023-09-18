@@ -20,7 +20,7 @@ pub fn retry_with_times(
     mut f: impl FnMut() -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     for _ in 0..times {
-        if let Ok(_) = f() {
+        if f().is_ok() {
             return Ok(());
         }
     }
@@ -51,10 +51,10 @@ impl<N: Network> AutoFaucet<N> {
     pub fn new(
         aleo_rpc: Option<String>,
         pk: PrivateKey<N>,
-        vk: ViewKey<N>,
-        from_height: u32,
+        from_height: Option<u32>,
     ) -> anyhow::Result<Self> {
         let unspent_records = RocksDB::open_map("unspent_records")?;
+        let vk = ViewKey::try_from(&pk)?;
         let network = RocksDB::open_map("network")?;
 
         let (network_key, aleo_client) = match aleo_rpc {
@@ -66,8 +66,7 @@ impl<N: Network> AutoFaucet<N> {
         };
 
         let pm = ProgramManager::new(Some(pk), None, Some(aleo_client.clone()), None)?;
-        let cur = network.get(&network_key)?.unwrap_or(0);
-        if from_height > cur {
+        if let Some(from_height) = from_height {
             network.insert(&network_key, &from_height)?;
         }
 

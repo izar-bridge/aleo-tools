@@ -10,7 +10,7 @@ async fn main() {
     tracing_subscriber::fmt().init();
     let cli = cli::Cli::parse();
 
-    cli.command.parse();
+    cli.command.parse().await;
 }
 
 // const RESULT_PATH: &str = "result.txt";

@@ -17,17 +17,18 @@ pub struct Cli {
 pub enum Command {
     #[clap(name = "multi")]
     Multi(MultiCli),
-    #[clap(name = "nft")]
+    #[clap(subcommand)]
     Nft(NftCli),
     #[clap(name = "relay")]
     Relay(RelayCli),
 }
 
 impl Command {
-    pub fn parse(self) {
+    pub async fn parse(self) {
         match self {
             Self::Multi(c) => c.parse(),
-            _ => unimplemented!(),
+            Self::Relay(c) => c.parse().await,
+            Self::Nft(c) => c.parse().await,
         }
     }
 }

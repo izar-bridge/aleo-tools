@@ -1,8 +1,8 @@
 use std::{ops::Index, str::FromStr, time::Duration};
 
 use aleo_rust::{
-    Address, AleoAPIClient, Block, Ciphertext, Credits, Network, Plaintext, PrivateKey,
-    ProgramManager, Record, ViewKey, ConsensusStore, ConsensusMemory, VM, Query,
+    Address, AleoAPIClient, Block, Ciphertext, ConsensusMemory, ConsensusStore, Credits, Network,
+    Plaintext, PrivateKey, ProgramManager, Query, Record, ViewKey, VM,
 };
 use rand::Rng;
 use rayon::prelude::*;
@@ -60,7 +60,7 @@ impl<N: Network> MultiManager<N> {
             None => AleoAPIClient::testnet3(),
         };
 
-        let pm = ProgramManager::new(Some(pks[0].clone()), None, Some(aleo_client.clone()), None)?;
+        let pm = ProgramManager::new(Some(pks[0]), None, Some(aleo_client.clone()), None)?;
         let mut multi = vec![];
         for pk in pks {
             match ManagerUnit::new(pk) {
@@ -121,10 +121,10 @@ impl<N: Network> MultiManager<N> {
                     tracing::error!("handle credits error: {:?}", e);
                 }
             });
+            self.current_height.insert(&1, &end)?;
         }
 
         self.current_height.insert(&1, &latest)?;
-
         Ok(())
     }
 
@@ -227,7 +227,6 @@ impl<N: Network> MultiManager<N> {
 
         let pk = &self.multi.index(multi_idx).pk;
 
-
         // Initialize a VM
         let rng = &mut rand::thread_rng();
         let store = ConsensusStore::<N, ConsensusMemory<N>>::open(None)?;
@@ -259,7 +258,9 @@ impl<N: Network> MultiManager<N> {
 
     pub fn sync_and_serve(&self) {
         tracing::error_span!("FAST_SYNC").in_scope(|| {
-            self.fast_sync().expect("failed to sync aleo");
+            if let Err(e) = self.fast_sync() {
+                tracing::error!("failed to fast sync: {e}");
+            }
             self.serve()
         })
     }
