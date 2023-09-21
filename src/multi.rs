@@ -188,6 +188,7 @@ impl<N: Network> MultiManager<N> {
             while let Ok(r) = u.records.pop_n_front(2) {
                 let amount_record = r[0].clone();
                 if let Ok(amount) = amount_record.1.microcredits() {
+                    let amount = amount.min(500);
                     let execution = TransferExecution {
                         multi_idx: idx,
                         receiver: self.select_receiver(),
