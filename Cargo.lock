@@ -2864,14 +2864,11 @@ version = "0.16.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "56a3aac4e1dc3fd253b71ea018b0159364c501cc8f576924e491f50664d13c7c"
 dependencies = [
- "aleo-std",
  "anyhow",
  "bincode",
  "indexmap 2.0.0",
- "once_cell",
  "parking_lot",
  "rayon",
- "rocksdb",
  "serde",
  "snarkvm-console",
  "snarkvm-ledger-authority",
@@ -2881,7 +2878,6 @@ dependencies = [
  "snarkvm-ledger-narwhal-batch-certificate",
  "snarkvm-synthesizer-program",
  "snarkvm-synthesizer-snark",
- "tracing",
 ]
 
 [[package]]
