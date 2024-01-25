@@ -3,17 +3,17 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::str::FromStr;
 
-use crate::db::{DBMap, RocksDB};
 use aleo_rust::{
-    Address, AleoAPIClient, Block, Ciphertext, Credits, Network, Plaintext, PrivateKey,
-    ProgramManager, Record, ViewKey,
+    Address, AleoAPIClient, Literal, Network, Plaintext, PrivateKey, ProgramManager, TransferType,
+    Value,
 };
 use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc::Receiver;
 use tower_http::cors::Any;
 use tower_http::{cors::CorsLayer, trace, trace::TraceLayer};
 use tracing::Level;
+
+const MIN_EXEC_FEE: u64 = 20000000;
 
 pub fn retry_with_times(
     times: usize,
@@ -35,173 +35,33 @@ pub struct Execution {
     fee: u64,
 }
 
-#[derive(Clone)]
-pub struct AutoFaucet<N: Network> {
-    pk: PrivateKey<N>,
-    vk: ViewKey<N>,
-    pm: ProgramManager<N>,
-    client: AleoAPIClient<N>,
-    agent: ureq::Agent,
-    unspent_records: DBMap<String, Record<N, Plaintext<N>>>,
-    network: DBMap<String, u32>,
-    network_key: String,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransferExecution {
+    address: String,
+    amount: u64,
 }
 
-impl<N: Network> AutoFaucet<N> {
-    pub fn new(
-        aleo_rpc: Option<String>,
-        pk: PrivateKey<N>,
-        from_height: Option<u32>,
-    ) -> anyhow::Result<Self> {
-        let unspent_records = RocksDB::open_map("unspent_records")?;
-        let vk = ViewKey::try_from(&pk)?;
-        let network = RocksDB::open_map("network")?;
+#[derive(Clone)]
+pub struct AleoExecutor<N: Network> {
+    account: Address<N>,
+    pm: ProgramManager<N>,
+}
 
-        let (network_key, aleo_client) = match aleo_rpc {
-            Some(aleo_rpc) => (
-                format!("{}-{}", aleo_rpc, pk),
-                AleoAPIClient::new(&aleo_rpc, "testnet3")?,
-            ),
-            None => (format!("aleo_main_net-{pk}"), AleoAPIClient::testnet3()),
+impl<N: Network> AleoExecutor<N> {
+    pub fn new(aleo_rpc: Option<String>, pk: PrivateKey<N>) -> anyhow::Result<Self> {
+        let aleo_client = match aleo_rpc {
+            Some(aleo_rpc) => AleoAPIClient::new(&aleo_rpc, "testnet3")?,
+            None => AleoAPIClient::testnet3(),
         };
 
-        let pm = ProgramManager::new(Some(pk), None, Some(aleo_client.clone()), None)?;
-        if let Some(from_height) = from_height {
-            network.insert(&network_key, &from_height)?;
-        }
+        let account = Address::try_from(pk.clone())?;
 
-        Ok(Self {
-            vk,
-            pm,
-            client: aleo_client,
-            agent: ureq::Agent::new(),
-            unspent_records,
-            network,
-            pk,
-            network_key,
-        })
+        let pm = ProgramManager::new(Some(pk), None, Some(aleo_client.clone()), None, true)?;
+        Ok(Self { pm, account })
     }
 
-    pub fn sync(&self) -> anyhow::Result<()> {
-        let cur = self.network.get(&self.network_key)?.unwrap_or(0);
-        let latest = self.client.latest_height()?;
-        tracing::debug!("Requesting aleo blocks from {} to {}", cur, latest);
-        const BATCH_SIZE: usize = 50;
-
-        for start in (cur..latest).step_by(BATCH_SIZE) {
-            let end = (start + BATCH_SIZE as u32).min(latest);
-            tracing::warn!("Fetched aleo blocks from {} to {}", start, end);
-            self.get_blocks(start, end)?.into_iter().for_each(|b| {
-                if let Err(e) = self.handle_credits(&b) {
-                    tracing::error!("Error handling credits: {:?}", e);
-                }
-            })
-        }
-
-        self.network.insert(&self.network_key, &latest)?;
-        tracing::info!("Synced aleo blocks from {} to {}", cur, latest);
-        Ok(())
-    }
-
-    pub fn handle_credits(&self, block: &Block<N>) -> anyhow::Result<()> {
-        // handle in
-        block.clone().into_serial_numbers().for_each(|sn| {
-            let _ = self.unspent_records.remove(&sn.to_string());
-        });
-
-        // handle out
-        for (commit, record) in block.clone().into_records() {
-            if !record.is_owner(&self.vk) {
-                continue;
-            }
-            let sn = Record::<N, Ciphertext<N>>::serial_number(self.pk, commit)?;
-            let record = record.decrypt(&self.vk)?;
-            if let Ok(credits) = record.microcredits() {
-                if credits > 4000000 {
-                    tracing::info!("got a new record {:?}", record);
-                    self.unspent_records.insert(&sn.to_string(), &record)?;
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    pub fn execute_program(mut self, mut rx: Receiver<Execution>) {
-        while let Some(exec) = rx.blocking_recv() {
-            let mut exec_f = |exec: Execution| {
-                let (rid, fee_record) = self.get_record()?;
-                let result = self.pm.execute_program(
-                    exec.program_id,
-                    exec.program_function,
-                    exec.inputs.iter(),
-                    exec.fee,
-                    fee_record.clone(),
-                    None,
-                );
-
-                if let Err(e) = &result {
-                    if !e.to_string().contains("already exists in the ledger")
-                        && !e.to_string().contains("Fee record does not have enough")
-                    {
-                        self.unspent_records.insert(&rid, &fee_record)?;
-                    }
-                }
-                result
-            };
-
-            let result = exec_f(exec);
-            tracing::info!("result: {:?}", result);
-        }
-    }
-
-    pub fn get_blocks(&self, start_height: u32, end_height: u32) -> anyhow::Result<Vec<Block<N>>> {
-        let start_time = std::time::Instant::now();
-        let url = format!(
-            "{}/{}/blocks?start={start_height}&end={end_height}",
-            self.client.base_url(),
-            self.client.network_id()
-        );
-        let blocks = match self.agent.get(&url).call()?.into_json() {
-            Ok(blocks) => Ok(blocks),
-            Err(error) => {
-                anyhow::bail!("Failed to parse blocks {start_height} (inclusive) to {end_height} (exclusive): {error}")
-            }
-        };
-
-        tracing::debug!(
-            "Fetched aleo blocks from {} to {} in {:?}",
-            start_height,
-            end_height,
-            start_time.elapsed()
-        );
-        blocks
-    }
-
-    fn initial(self) -> Self {
-        let self_clone = self.clone();
-        std::thread::spawn(move || loop {
-            if let Err(e) = self_clone.sync() {
-                tracing::error!("failed to sync aleo: {}", e);
-            }
-            tracing::info!("Holding records balance {:?}", self_clone.get_balance());
-            std::thread::sleep(std::time::Duration::from_secs(15));
-        });
-        self
-    }
-
-    pub fn get_balance(&self) -> anyhow::Result<u64> {
-        let mut balance = 0;
-        for (_, record) in self.unspent_records.get_all()? {
-            balance += record.microcredits()?;
-        }
-        Ok(balance)
-    }
-
-    pub async fn sync_and_initial(self, addr: SocketAddr) -> anyhow::Result<()> {
-        self.sync().expect("failed to sync aleo");
-        let node = self.initial();
-
+    pub async fn initial(self, addr: SocketAddr) -> anyhow::Result<()> {
+        let node = self.clone();
         // initial server
         let cors = CorsLayer::new()
             .allow_origin(Any)
@@ -213,6 +73,7 @@ impl<N: Network> AutoFaucet<N> {
             .allow_headers([axum::http::header::CONTENT_TYPE]);
         let router = Router::new()
             .route("/exec", post(exec))
+            .route("/tranfer", post(transfer))
             .with_state(node)
             .layer(cors)
             .layer(
@@ -222,76 +83,45 @@ impl<N: Network> AutoFaucet<N> {
             );
 
         tracing::info!("relayer listening on {}", addr);
-        axum::Server::bind(&addr)
-            .serve(router.into_make_service())
-            .await?;
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        axum::serve(listener, router.into_make_service()).await?;
         Ok(())
     }
 
-    pub fn get_record(&self) -> anyhow::Result<(String, Record<N, Plaintext<N>>)> {
-        let record = self.unspent_records.pop_front()?;
-        let (rid, record) = record.ok_or(anyhow::anyhow!("no fee record"))?;
-
-        Ok((rid, record))
-    }
-
     pub fn execute(&mut self, exec: Execution) -> anyhow::Result<String> {
-        let (rid, fee_record) = self.get_record()?;
+        if self.get_balance()? < MIN_EXEC_FEE {
+            return Err(anyhow::anyhow!("balance not enough"));
+        }
         let result = self.pm.execute_program(
             exec.program_id,
             exec.program_function,
             exec.inputs.iter(),
             exec.fee,
-            fee_record.clone(),
+            None,
             None,
         );
 
-        if let Err(e) = &result {
-            if !e.to_string().contains("already exists in the ledger")
-                && !e.to_string().contains("Fee record does not have enough")
-            {
-                self.unspent_records.insert(&rid, &fee_record)?;
-            }
-        }
         result
     }
 
     pub fn transfer(&mut self, addr: String, amount: u64) -> anyhow::Result<(String, String)> {
+        if self.get_balance()? < amount {
+            return Err(anyhow::anyhow!("balance not enough"));
+        }
         let addr: Address<N> = Address::<N>::from_str(&addr)?;
         tracing::warn!("transfering to {} amount {amount}", addr);
 
-        let records = self.unspent_records.pop_n_front(2)?;
-        let (r1, transfer_record) = &records[0];
-        let (r2, fee_record) = &records[1];
+        let result =
+            self.pm
+                .transfer(amount, 0, addr, TransferType::Public, None, None, None)?;
 
-        match self.pm.transfer(
-            amount,
-            25000,
-            addr,
-            aleo_rust::TransferType::Private,
-            None,
-            Some(transfer_record.clone()),
-            fee_record.clone(),
-        ) {
-            Ok(result) => Ok((addr.to_string(), result)),
-            Err(e) => {
-                if !e.to_string().contains("already exists in the ledger") {
-                    tracing::warn!("reinsert unspent records");
-                    self.unspent_records.insert(r1, transfer_record)?;
-                    self.unspent_records.insert(r2, fee_record)?;
-                }
-
-                Err(e)
-            }
-        }
+        Ok((addr.to_string(), result))
     }
 
     pub fn add_nft(&mut self, nft_id: String) -> anyhow::Result<(String, String)> {
         tracing::warn!("adding nft {nft_id}");
 
         let nft_input = from_nft_id(nft_id.clone());
-
-        let (rid, fee_record) = self.get_record()?;
 
         let inputs = vec![nft_input, "0scalar".to_string()];
 
@@ -300,29 +130,15 @@ impl<N: Network> AutoFaucet<N> {
             "add_nft",
             inputs.iter(),
             40000,
-            fee_record.clone(),
             None,
-        );
+            None,
+        )?;
 
-        match result {
-            Ok(result) => Ok((nft_id, result)),
-            Err(e) => {
-                if !e.to_string().contains("already exists in the ledger")
-                    && (!e.to_string().contains("Fee record does not have enough")
-                        && fee_record.microcredits().unwrap() < 40000)
-                {
-                    tracing::warn!("reinsert unspent records");
-                    self.unspent_records.insert(&rid, &fee_record)?;
-                }
-                Err(e)
-            }
-        }
+        Ok((nft_id, result))
     }
 
     pub fn add_white_list(&mut self, addr: String) -> anyhow::Result<(String, String)> {
         tracing::warn!("adding white list {addr}");
-
-        let (rid, fee_record) = self.get_record()?;
 
         let inputs = vec![addr.to_string(), "1u8".to_string()];
 
@@ -331,28 +147,36 @@ impl<N: Network> AutoFaucet<N> {
             "add_minter",
             inputs.iter(),
             40000,
-            fee_record.clone(),
             None,
-        );
+            None,
+        )?;
 
-        match result {
-            Ok(result) => Ok((addr.to_string(), result)),
-            Err(e) => {
-                if !e.to_string().contains("already exists in the ledger")
-                    && (!e.to_string().contains("Fee record does not have enough")
-                        && fee_record.microcredits().unwrap() < 40000)
-                {
-                    tracing::warn!("reinsert unspent records");
-                    self.unspent_records.insert(&rid, &fee_record)?;
-                }
-                Err(e)
+        Ok((addr, result))
+    }
+
+    pub fn get_balance(&self) -> anyhow::Result<u64> {
+        let key = Plaintext::from_str(&self.account.to_string())?;
+        let v = self
+            .client()
+            .get_mapping_value("credits.aleo", "account", key)?;
+        if let Value::Plaintext(p) = v {
+            if let Plaintext::Literal(Literal::U64(v), _) = p {
+                Ok(*v)
+            } else {
+                Err(anyhow::anyhow!("get balance error"))
             }
+        } else {
+            Err(anyhow::anyhow!("get balance error"))
         }
+    }
+
+    pub fn client(&self) -> &AleoAPIClient<N> {
+        self.pm.api_client().unwrap()
     }
 }
 
 async fn exec<N: Network>(
-    State(mut node): State<AutoFaucet<N>>,
+    State(mut node): State<AleoExecutor<N>>,
     Json(req): Json<Execution>,
 ) -> anyhow::Result<Json<String>, (StatusCode, String)> {
     let tid = node.execute(req).map_err(|e| {
@@ -361,6 +185,18 @@ async fn exec<N: Network>(
     })?;
 
     Ok(Json(tid))
+}
+
+async fn transfer<N: Network>(
+    State(mut node): State<AleoExecutor<N>>,
+    Json(req): Json<TransferExecution>,
+) -> anyhow::Result<Json<(String, String)>, (StatusCode, String)> {
+    let (addr, tid) = node.transfer(req.address, req.amount).map_err(|e| {
+        tracing::error!("failed to transfer: {}", e);
+        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+    })?;
+
+    Ok(Json((addr, tid)))
 }
 
 pub fn from_nft_id(nft_id: String) -> String {

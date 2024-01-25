@@ -3,9 +3,9 @@ use std::{io::Write, path::PathBuf, str::FromStr, time::Duration};
 use aleo_rust::{Address, PrivateKey, Testnet3};
 use clap::Parser;
 
-use crate::faucet::AutoFaucet;
+use crate::faucet::AleoExecutor;
 
-use super::multi::get_from_line;
+use super::get_from_line;
 
 #[derive(Debug, Parser)]
 pub enum NftCli {
@@ -15,9 +15,6 @@ pub enum NftCli {
 
         #[clap(long)]
         pk: String,
-
-        #[clap(long)]
-        from_height: Option<u32>,
 
         #[clap(long)]
         path: PathBuf,
@@ -34,9 +31,6 @@ pub enum NftCli {
         pk: String,
 
         #[clap(long)]
-        from_height: Option<u32>,
-
-        #[clap(long)]
         path: PathBuf,
 
         #[clap(long, default_value = "result.txt")]
@@ -50,7 +44,6 @@ impl NftCli {
             Self::Nft {
                 aleo_rpc,
                 pk,
-                from_height,
                 path,
                 output,
             } => {
@@ -61,14 +54,10 @@ impl NftCli {
                     .open(output.clone())
                     .expect("result file");
                 let mut faucet =
-                    AutoFaucet::new(aleo_rpc, pk, from_height).expect("execution node error: {e}");
+                    AleoExecutor::new(aleo_rpc, pk).expect("execution node error: {e}");
                 let nfts = get_from_line::<NFTStr>(path).expect("get nfts from path error: {e}");
-                faucet.sync().expect("failed initial sync");
 
                 for nft in nfts {
-                    if let Err(e) = faucet.sync() {
-                        tracing::error!("sync error: {e}");
-                    }
                     for _ in 0..3 {
                         match faucet.add_nft(nft.to_string()) {
                             Ok((nft_id, tx_id)) => {
@@ -87,7 +76,6 @@ impl NftCli {
             Self::WhiteList {
                 aleo_rpc,
                 pk,
-                from_height,
                 path,
                 output,
             } => {
@@ -98,15 +86,11 @@ impl NftCli {
                     .open(output.clone())
                     .expect("result file");
                 let mut faucet =
-                    AutoFaucet::new(aleo_rpc, pk, from_height).expect("execution node error: {e}");
+                    AleoExecutor::new(aleo_rpc, pk).expect("execution node error: {e}");
                 let addrs = get_from_line::<Address<Testnet3>>(path)
                     .expect("get nfts from path error: {e}");
-                faucet.sync().expect("failed initial sync");
 
                 for addr in addrs {
-                    if let Err(e) = faucet.sync() {
-                        tracing::error!("sync error: {e}");
-                    }
                     for _ in 0..3 {
                         match faucet.add_white_list(addr.to_string()) {
                             Ok((addr, tx_id)) => {
