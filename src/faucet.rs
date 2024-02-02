@@ -4,8 +4,7 @@ use std::path::Path;
 use std::str::FromStr;
 
 use aleo_rust::{
-    Address, AleoAPIClient, Literal, Network, Plaintext, PrivateKey, ProgramManager, TransferType,
-    Value,
+    Address, AleoAPIClient, Literal, Network, Plaintext, PrivateKey, ProgramManager, Value,
 };
 use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
 use serde::{Deserialize, Serialize};
@@ -73,7 +72,7 @@ impl<N: Network> AleoExecutor<N> {
             .allow_headers([axum::http::header::CONTENT_TYPE]);
         let router = Router::new()
             .route("/exec", post(exec))
-            .route("/tranfer", post(transfer))
+            .route("/transfer", post(transfer))
             .with_state(node)
             .layer(cors)
             .layer(
@@ -111,10 +110,17 @@ impl<N: Network> AleoExecutor<N> {
         let addr: Address<N> = Address::<N>::from_str(&addr)?;
         tracing::warn!("transfering to {} amount {amount}", addr);
 
-        let result =
-            self.pm
-                .transfer(amount, 0, addr, TransferType::Public, None, None, None)?;
-
+        let inputs = vec![addr.to_string(), format!("{amount}u64")];
+        tracing::info!("inputs {:?}", inputs);
+        let result = self.pm.execute_program(
+            "credits.aleo",
+            "transfer_public",
+            inputs.iter(),
+            2500,
+            None,
+            None,
+        )?;
+        tracing::info!("executed transaction id {result}");
         Ok((addr.to_string(), result))
     }
 
@@ -269,4 +275,26 @@ fn test_gen_addr() {
 
         file.write_all(line.as_bytes()).unwrap();
     }
+}
+
+#[test]
+fn test_get_map_value() {
+    use aleo_rust::Testnet3;
+    use std::str::FromStr;
+
+    let aleo_client = AleoAPIClient::<Testnet3>::testnet3();
+    println!("{}", aleo_client.base_url());
+    let key = Plaintext::<Testnet3>::from_str(
+        "aleo14dghlkvsr0wf8ykurd7zkn79gz8utawuaar2pfhltpv3y5fttcps879ssf",
+    )
+    .unwrap();
+    // let v = aleo_client.get_mapping_value("credits.aleo", "account", key.clone()).unwrap();
+    // println!("{:?}", v);
+    let url = format!(
+        "{}/testnet3/program/credits.aleo/mapping/account/{}",
+        aleo_client.base_url(),
+        key
+    );
+    let resp = ureq::get(&url).call().unwrap();
+    println!("{:?}", resp.into_string().unwrap());
 }
