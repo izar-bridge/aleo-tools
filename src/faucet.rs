@@ -120,12 +120,15 @@ impl<N: Network> AleoExecutor<N> {
 
     pub fn executor(mut self) -> anyhow::Result<()> {
         loop {
-            if let Some((_key, value)) = self.channel.pop_front()? {
+            if let Some((key, value)) = self.channel.pop_front()? {
+                let value_clone = value.clone();
                 let result = self.transfer(value.address, value.amount);
                 if let Ok((addr, tid)) = result {
                     tracing::info!("transfered to {:?}, tid: {tid}", addr);
                 } else {
                     tracing::error!("transfer failed {:?}", result);
+                    // reinsert
+                    self.channel.insert(&key, &value_clone)?;
                 }
             } else {
                 tracing::info!("channel is empty, sleep 5s");
