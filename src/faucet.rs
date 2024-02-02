@@ -222,15 +222,15 @@ async fn exec<N: Network>(
 }
 
 async fn transfer<N: Network>(
-    State(mut node): State<AleoExecutor<N>>,
+    State(node): State<AleoExecutor<N>>,
     Json(req): Json<TransferExecution>,
-) -> anyhow::Result<Json<(String, String)>, (StatusCode, String)> {
-    let (addr, tid) = node.transfer(req.address, req.amount).map_err(|e| {
-        tracing::error!("failed to transfer: {}", e);
-        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+) -> anyhow::Result<String, StatusCode> {
+    node.channel.insert(&req.address, &req).map_err(|e| {
+        tracing::error!("failed to insert to channel: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    Ok(Json((addr, tid)))
+    Ok(format!("transfering {req:?} is already in channel"))
 }
 
 pub fn from_nft_id(nft_id: String) -> String {
