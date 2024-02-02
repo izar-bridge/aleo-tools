@@ -19,11 +19,7 @@ pub struct RelayCli {
 
 impl RelayCli {
     pub async fn parse(self) {
-        let Self {
-            aleo_rpc,
-            pk,
-            port,
-        } = self;
+        let Self { aleo_rpc, pk, port } = self;
         let pk = PrivateKey::<Testnet3>::from_str(&pk).expect("private key");
 
         let faucet = AleoExecutor::new(aleo_rpc, pk).expect("faucet");

@@ -31,7 +31,6 @@ impl Command {
     }
 }
 
-
 pub fn get_from_line<T: FromStr>(path: impl AsRef<Path>) -> anyhow::Result<Vec<T>> {
     let mut file = std::fs::File::open(path)?;
 

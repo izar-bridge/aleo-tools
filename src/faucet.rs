@@ -12,6 +12,8 @@ use tower_http::cors::Any;
 use tower_http::{cors::CorsLayer, trace, trace::TraceLayer};
 use tracing::Level;
 
+use crate::db::{DBMap, RocksDB};
+
 const MIN_EXEC_FEE: u64 = 20000000;
 
 pub fn retry_with_times(
@@ -44,6 +46,7 @@ pub struct TransferExecution {
 pub struct AleoExecutor<N: Network> {
     account: Address<N>,
     pm: ProgramManager<N>,
+    channel: DBMap<String, TransferExecution>,
 }
 
 impl<N: Network> AleoExecutor<N> {
@@ -56,7 +59,12 @@ impl<N: Network> AleoExecutor<N> {
         let account = Address::try_from(pk.clone())?;
 
         let pm = ProgramManager::new(Some(pk), None, Some(aleo_client.clone()), None, true)?;
-        Ok(Self { pm, account })
+        let channel = RocksDB::open_map("channel")?;
+        Ok(Self {
+            pm,
+            account,
+            channel,
+        })
     }
 
     pub async fn initial(self, addr: SocketAddr) -> anyhow::Result<()> {
@@ -81,6 +89,13 @@ impl<N: Network> AleoExecutor<N> {
                     .on_response(trace::DefaultOnResponse::new().level(Level::INFO)),
             );
 
+        tokio::task::spawn_blocking(move || {
+            if let Err(e) = self.executor() {
+                tracing::error!("executor error: {:?}", e);
+                std::process::exit(1);
+            }
+        });
+
         tracing::info!("relayer listening on {}", addr);
         let listener = tokio::net::TcpListener::bind(addr).await?;
         axum::serve(listener, router.into_make_service()).await?;
@@ -101,6 +116,19 @@ impl<N: Network> AleoExecutor<N> {
         );
 
         result
+    }
+
+    pub fn executor(mut self) -> anyhow::Result<()> {
+        while let Some((_key, value)) = self.channel.pop_front()? {
+            let result = self.transfer(value.address, value.amount);
+            if let Ok((addr, tid)) = result {
+                tracing::info!("transfered to {:?}, tid: {tid}", addr);
+            } else {
+                tracing::error!("transfer failed {:?}", result);
+            }
+        }
+
+        Ok(())
     }
 
     pub fn transfer(&mut self, addr: String, amount: u64) -> anyhow::Result<(String, String)> {
