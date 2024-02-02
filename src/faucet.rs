@@ -119,16 +119,19 @@ impl<N: Network> AleoExecutor<N> {
     }
 
     pub fn executor(mut self) -> anyhow::Result<()> {
-        while let Some((_key, value)) = self.channel.pop_front()? {
-            let result = self.transfer(value.address, value.amount);
-            if let Ok((addr, tid)) = result {
-                tracing::info!("transfered to {:?}, tid: {tid}", addr);
+        loop {
+            if let Some((_key, value)) = self.channel.pop_front()? {
+                let result = self.transfer(value.address, value.amount);
+                if let Ok((addr, tid)) = result {
+                    tracing::info!("transfered to {:?}, tid: {tid}", addr);
+                } else {
+                    tracing::error!("transfer failed {:?}", result);
+                }
             } else {
-                tracing::error!("transfer failed {:?}", result);
+                tracing::info!("channel is empty, sleep 5s");
+                std::thread::sleep(std::time::Duration::from_secs(5));
             }
         }
-
-        Ok(())
     }
 
     pub fn transfer(&mut self, addr: String, amount: u64) -> anyhow::Result<(String, String)> {
