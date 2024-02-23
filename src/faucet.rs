@@ -326,25 +326,3 @@ fn test_gen_addr() {
         file.write_all(line.as_bytes()).unwrap();
     }
 }
-
-#[test]
-fn test_get_map_value() {
-    use aleo_rust::Testnet3;
-    use std::str::FromStr;
-
-    let aleo_client = AleoAPIClient::<Testnet3>::testnet3();
-    println!("{}", aleo_client.base_url());
-    let key = Plaintext::<Testnet3>::from_str(
-        "aleo14dghlkvsr0wf8ykurd7zkn79gz8utawuaar2pfhltpv3y5fttcps879ssf",
-    )
-    .unwrap();
-    // let v = aleo_client.get_mapping_value("credits.aleo", "account", key.clone()).unwrap();
-    // println!("{:?}", v);
-    let url = format!(
-        "{}/testnet3/program/credits.aleo/mapping/account/{}",
-        aleo_client.base_url(),
-        key
-    );
-    let resp = ureq::get(&url).call().unwrap();
-    println!("{:?}", resp.into_string().unwrap());
-}
