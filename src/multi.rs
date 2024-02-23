@@ -17,7 +17,7 @@ pub struct MultiClient<N: Network> {
 }
 
 impl<N: Network> MultiClient<N> {
-    pub fn file(aleo_rpc: Option<String>, path: impl AsRef<Path>) -> anyhow::Result<Self> {
+    pub fn file(aleo_rpc: Option<String>, path: impl AsRef<Path>, from_height: Option<u32>) -> anyhow::Result<Self> {
         let list = crate::cli::get_from_line::<PrivateKey<N>>(path)?;
         let executors = list
             .into_iter()
@@ -29,6 +29,11 @@ impl<N: Network> MultiClient<N> {
             .collect::<HashMap<_, _>>();
         let heights = RocksDB::open_map("heights")?;
         let records = RocksDB::open_map("records")?;
+
+        if let Some(h) = from_height {
+            heights.insert(&N::ID, &h)?;
+        }
+
         Ok(MultiClient {
             executors,
             heights,

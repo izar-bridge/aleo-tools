@@ -1,10 +1,9 @@
-use std::{io::Write, path::PathBuf, str::FromStr};
+use std::{io::Write, ops::Deref, path::PathBuf, str::FromStr};
 
 use aleo_rust::{Address, PrivateKey, Testnet3};
 use clap::Parser;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use snarkvm::console::program::Owner;
 
 use crate::faucet::{AleoExecutor, Execution};
 
@@ -21,6 +20,9 @@ pub enum InscribeCli {
 
         #[clap(long)]
         number: u64,
+
+        #[clap(long)]
+        from_height: Option<u32>,
 
         #[clap(long, default_value = "inscribe_result.txt")]
         output: PathBuf,
@@ -49,6 +51,9 @@ pub enum InscribeCli {
 
         #[clap(long, default_value = "accounts.txt")]
         output: PathBuf,
+
+        #[clap(long, default_value = "pks.txt")]
+        pks: PathBuf,
     },
 }
 
@@ -65,6 +70,7 @@ impl InscribeCli {
                 let pk = PrivateKey::<Testnet3>::from_str(&pk).expect("private key error");
                 let addrs = get_from_line::<Address<Testnet3>>(path)
                     .expect("get addresses from path error");
+                println!("has {} addresses", addrs.len());
                 let mut output_file = std::fs::File::create(output.clone()).expect("result file");
 
                 let mut faucet = AleoExecutor::new(aleo_rpc, pk).expect("execution node error");
@@ -101,12 +107,19 @@ impl InscribeCli {
                 }
             }
 
-            Self::GenAccount { number, output } => {
+            Self::GenAccount {
+                number,
+                output,
+                pks,
+            } => {
                 let mut output_file = std::fs::File::create(output.clone()).expect("result file");
+                let mut pks_file = std::fs::File::create(pks.clone()).expect("pks file");
                 let mut rng = rand::thread_rng();
                 for _ in 0..number {
                     let pk = PrivateKey::<Testnet3>::new(&mut rng).unwrap();
-                    writeln!(output_file, "{}", pk).expect("write success");
+                    writeln!(pks_file, "{}", pk).expect("write success");
+                    let addr = Address::try_from(pk).unwrap();
+                    writeln!(output_file, "{}", addr).expect("write success");
                 }
             }
 
@@ -115,39 +128,47 @@ impl InscribeCli {
                 path,
                 mut number,
                 output,
+                from_height,
             } => {
-                let mut multi = crate::multi::MultiClient::<Testnet3>::file(aleo_rpc, path)
-                    .expect("multi client error");
+                let mut multi =
+                    crate::multi::MultiClient::<Testnet3>::file(aleo_rpc, path, from_height)
+                        .expect("multi client error");
                 let mut output_file = std::fs::File::create(output.clone()).expect("result file");
                 let mut rng = rand::thread_rng();
                 loop {
                     if let Err(e) = multi.sync() {
                         tracing::error!("sync error: {}", e);
+                        std::thread::sleep(std::time::Duration::from_secs(10));
                     }
 
                     let records = multi.records().get_all().unwrap();
+                    if records.len() == 0 {
+                        tracing::info!("no records");
+                        std::thread::sleep(std::time::Duration::from_secs(5));
+                        continue;
+                    }
                     for (rid, r) in records {
-                        if let Owner::Public(who) = r.owner() {
-                            let executor = multi.executors.get_mut(who).unwrap();
-                            let inscribe = Execution {
-                                program_id: "unizexe_protocol.aleo".to_string(),
-                                program_function: "inscribe".to_string(),
-                                inputs: vec![get_random_inscription(&mut rng), r.to_string()],
-                                fee: 5000,
-                            };
-                            match executor.execute(inscribe) {
-                                Ok(tid) => {
-                                    multi.records().remove(&rid).unwrap();
-                                    number -= 1;
-                                    tracing::info!("inscribe success: {}", tid);
-                                    writeln!(output_file, "{who},{tid}").unwrap();
-                                    if number == 0 {
-                                        return;
-                                    }
+                        tracing::info!("inscribing: {}", r.owner());
+                        let who = r.owner().deref();
+                        let executor = multi.executors.get_mut(who).unwrap();
+                        let inscribe = Execution {
+                            program_id: "unizexe_protocol.aleo".to_string(),
+                            program_function: "inscribe".to_string(),
+                            inputs: vec![get_random_inscription(&mut rng), r.to_string()],
+                            fee: 5000,
+                        };
+                        match executor.execute(inscribe) {
+                            Ok(tid) => {
+                                multi.records().remove(&rid).unwrap();
+                                number -= 1;
+                                tracing::info!("inscribe success: {}", tid);
+                                writeln!(output_file, "{who},{tid}").unwrap();
+                                if number == 0 {
+                                    return;
                                 }
-                                Err(e) => {
-                                    tracing::error!("inscribe error: {}", e);
-                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("inscribe error: {}", e);
                             }
                         }
                     }

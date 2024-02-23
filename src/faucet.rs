@@ -14,7 +14,7 @@ use tracing::Level;
 
 use crate::db::{DBMap, RocksDB};
 
-const MIN_EXEC_FEE: u64 = 20000000;
+const MIN_EXEC_FEE: u64 = 1000000;
 
 pub fn retry_with_times(
     times: usize,
