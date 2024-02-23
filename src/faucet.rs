@@ -4,7 +4,7 @@ use std::path::Path;
 use std::str::FromStr;
 
 use aleo_rust::{
-    Address, AleoAPIClient, Literal, Network, Plaintext, PrivateKey, ProgramManager, Value,
+    Address, AleoAPIClient, Literal, Network, Plaintext, PrivateKey, ProgramManager, Value, ViewKey
 };
 use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
 use serde::{Deserialize, Serialize};
@@ -30,10 +30,10 @@ pub fn retry_with_times(
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Execution {
-    program_id: String,
-    program_function: String,
-    inputs: Vec<String>,
-    fee: u64,
+    pub program_id: String,
+    pub program_function: String,
+    pub inputs: Vec<String>,
+    pub fee: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,6 +47,8 @@ pub struct AleoExecutor<N: Network> {
     account: Address<N>,
     pm: ProgramManager<N>,
     channel: DBMap<String, TransferExecution>,
+    pk: PrivateKey<N>,
+    vk: ViewKey<N>,
 }
 
 impl<N: Network> AleoExecutor<N> {
@@ -57,13 +59,15 @@ impl<N: Network> AleoExecutor<N> {
         };
 
         let account = Address::try_from(pk.clone())?;
-
-        let pm = ProgramManager::new(Some(pk), None, Some(aleo_client.clone()), None, true)?;
+        let vk = ViewKey::try_from(pk.clone())?;
+        let pm = ProgramManager::new(Some(pk.clone()), None, Some(aleo_client.clone()), None, true)?;
         let channel = RocksDB::open_map("channel")?;
         Ok(Self {
             pm,
             account,
             channel,
+            pk,
+            vk,
         })
     }
 
@@ -210,8 +214,20 @@ impl<N: Network> AleoExecutor<N> {
         }
     }
 
+    pub fn account(&self) -> Address<N> {
+        self.account
+    }
+
     pub fn client(&self) -> &AleoAPIClient<N> {
         self.pm.api_client().unwrap()
+    }
+
+    pub fn private_key(&self) -> PrivateKey<N> {
+        self.pk
+    }
+
+    pub fn view_key(&self) -> ViewKey<N> {
+        self.vk
     }
 }
 

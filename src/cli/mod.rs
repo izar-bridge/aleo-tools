@@ -1,5 +1,6 @@
 pub mod nft;
 pub mod relay;
+pub mod inscribe;
 
 use std::{io::Read, path::Path, str::FromStr};
 
