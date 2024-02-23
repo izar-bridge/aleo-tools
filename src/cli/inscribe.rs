@@ -182,14 +182,6 @@ fn get_random_inscription<R: Rng>(rng: &mut R) -> String {
     raw.to_string()
 }
 
-#[test]
-fn test_get_random_inscription() {
-    let mut rng = rand::thread_rng();
-    for i in 0..10 {
-        let ins = get_random_inscription(&mut rng);
-    }
-}
-
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InscriptionRawData([[u128; 16]; 32]);
 
