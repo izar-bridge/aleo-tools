@@ -4,7 +4,7 @@ use std::path::Path;
 use std::str::FromStr;
 
 use aleo_rust::{
-    Address, AleoAPIClient, Literal, Network, Plaintext, PrivateKey, ProgramManager, Value, ViewKey
+    Address, AleoAPIClient, Literal, Network, Plaintext, PrivateKey, ProgramManager, Value, ViewKey,
 };
 use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
 use serde::{Deserialize, Serialize};
@@ -58,9 +58,9 @@ impl<N: Network> AleoExecutor<N> {
             None => AleoAPIClient::testnet3(),
         };
 
-        let account = Address::try_from(pk.clone())?;
-        let vk = ViewKey::try_from(pk.clone())?;
-        let pm = ProgramManager::new(Some(pk.clone()), None, Some(aleo_client.clone()), None, true)?;
+        let account = Address::try_from(pk)?;
+        let vk = ViewKey::try_from(pk)?;
+        let pm = ProgramManager::new(Some(pk), None, Some(aleo_client.clone()), None, true)?;
         let channel = RocksDB::open_map("channel")?;
         Ok(Self {
             pm,
@@ -200,15 +200,11 @@ impl<N: Network> AleoExecutor<N> {
 
     pub fn get_balance(&self) -> anyhow::Result<u64> {
         let key = Plaintext::from_str(&self.account.to_string())?;
-        let v = self
+        let value = self
             .client()
             .get_mapping_value("credits.aleo", "account", key)?;
-        if let Value::Plaintext(p) = v {
-            if let Plaintext::Literal(Literal::U64(v), _) = p {
-                Ok(*v)
-            } else {
-                Err(anyhow::anyhow!("get balance error"))
-            }
+        if let Value::Plaintext(Plaintext::Literal(Literal::U64(v), _)) = value {
+            Ok(*v)
         } else {
             Err(anyhow::anyhow!("get balance error"))
         }

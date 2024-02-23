@@ -1,6 +1,8 @@
 use std::{collections::HashMap, path::Path};
 
-use aleo_rust::{Address, AleoAPIClient, Block, Ciphertext, Credits, Network, Plaintext, PrivateKey, Record};
+use aleo_rust::{
+    Address, AleoAPIClient, Block, Ciphertext, Credits, Network, Plaintext, PrivateKey, Record,
+};
 
 use crate::{
     db::{DBMap, RocksDB},
@@ -19,11 +21,11 @@ impl<N: Network> MultiClient<N> {
         let list = crate::cli::get_from_line::<PrivateKey<N>>(path)?;
         let executors = list
             .into_iter()
-            .map(|pk| AleoExecutor::new(aleo_rpc.clone(), pk.clone()))
+            .map(|pk| AleoExecutor::new(aleo_rpc.clone(), pk))
             .collect::<anyhow::Result<Vec<_>>>()?;
         let executors = executors
             .into_iter()
-            .map(|e| (e.account().clone(), e))
+            .map(|e| (e.account(), e))
             .collect::<HashMap<_, _>>();
         let heights = RocksDB::open_map("heights")?;
         let records = RocksDB::open_map("records")?;
@@ -35,7 +37,7 @@ impl<N: Network> MultiClient<N> {
     }
 
     pub fn client(&self) -> &AleoAPIClient<N> {
-        &self
+        self
             .executors
             .values()
             .next()

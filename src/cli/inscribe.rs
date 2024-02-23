@@ -128,7 +128,7 @@ impl InscribeCli {
                     let records = multi.records().get_all().unwrap();
                     for (rid, r) in records {
                         if let Owner::Public(who) = r.owner() {
-                            let executor = multi.executors.get_mut(&who).unwrap();
+                            let executor = multi.executors.get_mut(who).unwrap();
                             let inscribe = Execution {
                                 program_id: "unizexe_protocol.aleo".to_string(),
                                 program_function: "inscribe".to_string(),
@@ -175,7 +175,9 @@ fn get_random_inscription<R: Rng>(rng: &mut R) -> String {
             "amt": lim,
         }
     )
-    .to_string().as_bytes().to_vec();
+    .to_string()
+    .as_bytes()
+    .to_vec();
     json_str.resize(32 * 16 * 16, 0);
     let raw = InscriptionRawData::from_slice(&json_str).unwrap();
 
