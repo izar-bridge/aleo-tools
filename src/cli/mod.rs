@@ -1,3 +1,4 @@
+pub mod inscribe;
 pub mod nft;
 pub mod relay;
 
@@ -5,7 +6,7 @@ use std::{io::Read, path::Path, str::FromStr};
 
 use clap::Parser;
 
-use self::{nft::NftCli, relay::RelayCli};
+use self::{inscribe::InscribeCli, nft::NftCli, relay::RelayCli};
 
 #[derive(Debug, Parser)]
 #[clap(name = "izar-tool")]
@@ -20,6 +21,8 @@ pub enum Command {
     Nft(NftCli),
     #[clap(name = "relay")]
     Relay(RelayCli),
+    #[clap(subcommand)]
+    Inscribe(InscribeCli),
 }
 
 impl Command {
@@ -27,10 +30,10 @@ impl Command {
         match self {
             Self::Relay(c) => c.parse().await,
             Self::Nft(c) => c.parse().await,
+            Self::Inscribe(c) => c.parse().await,
         }
     }
 }
-
 
 pub fn get_from_line<T: FromStr>(path: impl AsRef<Path>) -> anyhow::Result<Vec<T>> {
     let mut file = std::fs::File::open(path)?;

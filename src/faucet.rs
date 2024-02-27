@@ -4,8 +4,7 @@ use std::path::Path;
 use std::str::FromStr;
 
 use aleo_rust::{
-    Address, AleoAPIClient, Literal, Network, Plaintext, PrivateKey, ProgramManager, TransferType,
-    Value,
+    Address, AleoAPIClient, Literal, Network, Plaintext, PrivateKey, ProgramManager, Value, ViewKey,
 };
 use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
 use serde::{Deserialize, Serialize};
@@ -13,7 +12,9 @@ use tower_http::cors::Any;
 use tower_http::{cors::CorsLayer, trace, trace::TraceLayer};
 use tracing::Level;
 
-const MIN_EXEC_FEE: u64 = 20000000;
+use crate::db::{DBMap, RocksDB};
+
+const MIN_EXEC_FEE: u64 = 1000000;
 
 pub fn retry_with_times(
     times: usize,
@@ -29,10 +30,10 @@ pub fn retry_with_times(
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Execution {
-    program_id: String,
-    program_function: String,
-    inputs: Vec<String>,
-    fee: u64,
+    pub program_id: String,
+    pub program_function: String,
+    pub inputs: Vec<String>,
+    pub fee: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,6 +46,9 @@ pub struct TransferExecution {
 pub struct AleoExecutor<N: Network> {
     account: Address<N>,
     pm: ProgramManager<N>,
+    channel: DBMap<String, TransferExecution>,
+    pk: PrivateKey<N>,
+    vk: ViewKey<N>,
 }
 
 impl<N: Network> AleoExecutor<N> {
@@ -54,10 +58,17 @@ impl<N: Network> AleoExecutor<N> {
             None => AleoAPIClient::testnet3(),
         };
 
-        let account = Address::try_from(pk.clone())?;
-
+        let account = Address::try_from(pk)?;
+        let vk = ViewKey::try_from(pk)?;
         let pm = ProgramManager::new(Some(pk), None, Some(aleo_client.clone()), None, true)?;
-        Ok(Self { pm, account })
+        let channel = RocksDB::open_map("channel")?;
+        Ok(Self {
+            pm,
+            account,
+            channel,
+            pk,
+            vk,
+        })
     }
 
     pub async fn initial(self, addr: SocketAddr) -> anyhow::Result<()> {
@@ -73,7 +84,7 @@ impl<N: Network> AleoExecutor<N> {
             .allow_headers([axum::http::header::CONTENT_TYPE]);
         let router = Router::new()
             .route("/exec", post(exec))
-            .route("/tranfer", post(transfer))
+            .route("/transfer", post(transfer))
             .with_state(node)
             .layer(cors)
             .layer(
@@ -81,6 +92,13 @@ impl<N: Network> AleoExecutor<N> {
                     .make_span_with(trace::DefaultMakeSpan::new().level(Level::INFO))
                     .on_response(trace::DefaultOnResponse::new().level(Level::INFO)),
             );
+
+        tokio::task::spawn_blocking(move || {
+            if let Err(e) = self.executor() {
+                tracing::error!("executor error: {:?}", e);
+                std::process::exit(1);
+            }
+        });
 
         tracing::info!("relayer listening on {}", addr);
         let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -104,6 +122,25 @@ impl<N: Network> AleoExecutor<N> {
         result
     }
 
+    pub fn executor(mut self) -> anyhow::Result<()> {
+        loop {
+            if let Some((key, value)) = self.channel.pop_front()? {
+                let value_clone = value.clone();
+                let result = self.transfer(value.address, value.amount);
+                if let Ok((addr, tid)) = result {
+                    tracing::info!("transfered to {:?}, tid: {tid}", addr);
+                } else {
+                    tracing::error!("transfer failed {:?}", result);
+                    // reinsert
+                    self.channel.insert(&key, &value_clone)?;
+                }
+            } else {
+                tracing::info!("channel is empty, sleep 5s");
+                std::thread::sleep(std::time::Duration::from_secs(5));
+            }
+        }
+    }
+
     pub fn transfer(&mut self, addr: String, amount: u64) -> anyhow::Result<(String, String)> {
         if self.get_balance()? < amount {
             return Err(anyhow::anyhow!("balance not enough"));
@@ -111,10 +148,17 @@ impl<N: Network> AleoExecutor<N> {
         let addr: Address<N> = Address::<N>::from_str(&addr)?;
         tracing::warn!("transfering to {} amount {amount}", addr);
 
-        let result =
-            self.pm
-                .transfer(amount, 0, addr, TransferType::Public, None, None, None)?;
-
+        let inputs = vec![addr.to_string(), format!("{amount}u64")];
+        tracing::info!("inputs {:?}", inputs);
+        let result = self.pm.execute_program(
+            "credits.aleo",
+            "transfer_public",
+            inputs.iter(),
+            2500,
+            None,
+            None,
+        )?;
+        tracing::info!("executed transaction id {result}");
         Ok((addr.to_string(), result))
     }
 
@@ -156,22 +200,30 @@ impl<N: Network> AleoExecutor<N> {
 
     pub fn get_balance(&self) -> anyhow::Result<u64> {
         let key = Plaintext::from_str(&self.account.to_string())?;
-        let v = self
+        let value = self
             .client()
             .get_mapping_value("credits.aleo", "account", key)?;
-        if let Value::Plaintext(p) = v {
-            if let Plaintext::Literal(Literal::U64(v), _) = p {
-                Ok(*v)
-            } else {
-                Err(anyhow::anyhow!("get balance error"))
-            }
+        if let Value::Plaintext(Plaintext::Literal(Literal::U64(v), _)) = value {
+            Ok(*v)
         } else {
             Err(anyhow::anyhow!("get balance error"))
         }
     }
 
+    pub fn account(&self) -> Address<N> {
+        self.account
+    }
+
     pub fn client(&self) -> &AleoAPIClient<N> {
         self.pm.api_client().unwrap()
+    }
+
+    pub fn private_key(&self) -> PrivateKey<N> {
+        self.pk
+    }
+
+    pub fn view_key(&self) -> ViewKey<N> {
+        self.vk
     }
 }
 
@@ -188,15 +240,15 @@ async fn exec<N: Network>(
 }
 
 async fn transfer<N: Network>(
-    State(mut node): State<AleoExecutor<N>>,
+    State(node): State<AleoExecutor<N>>,
     Json(req): Json<TransferExecution>,
-) -> anyhow::Result<Json<(String, String)>, (StatusCode, String)> {
-    let (addr, tid) = node.transfer(req.address, req.amount).map_err(|e| {
-        tracing::error!("failed to transfer: {}", e);
-        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+) -> anyhow::Result<String, StatusCode> {
+    node.channel.insert(&req.address, &req).map_err(|e| {
+        tracing::error!("failed to insert to channel: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    Ok(Json((addr, tid)))
+    Ok(format!("transfering {req:?} is already in channel"))
 }
 
 pub fn from_nft_id(nft_id: String) -> String {
